@@ -1,0 +1,1442 @@
+import 'dart:io';
+import 'dart:async';
+import 'dart:math' as math;
+import 'dart:convert';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+
+import '../audio/piano_audio_service.dart';
+import '../core/core.dart';
+import '../parsers/parsers.dart';
+import '../services/musicxml_preload_service.dart';
+import '../visual_engine/visual_engine.dart';
+
+const double _minNoteSpacingScale = 0.75;
+const double _maxNoteSpacingScale = 1.0;
+final ValueNotifier<double> _noteSpacingScale = ValueNotifier<double>(_maxNoteSpacingScale);
+const double _minMusicStartOffsetScale = 0.0;
+const double _maxMusicStartOffsetScale = 1.0;
+final ValueNotifier<double> _musicStartOffsetScale = ValueNotifier<double>(_minMusicStartOffsetScale);
+
+enum _HitWindowState { none, early, perfect, late }
+
+class _HitWindowFeedback {
+  final _HitWindowState state;
+  final double deltaMs;
+  final String? notePitch;
+
+  const _HitWindowFeedback({
+    required this.state,
+    required this.deltaMs,
+    this.notePitch,
+  });
+}
+
+/// Pantalla principal del juego
+class GameScreen extends StatefulWidget {
+  final String? preloadedFilePath;
+  final String? preloadedContent;
+  final String? fileName;
+
+  const GameScreen({
+    Key? key,
+    this.preloadedFilePath,
+    this.preloadedContent,
+    this.fileName,
+  }) : super(key: key);
+
+  @override
+  State<GameScreen> createState() => _GameScreenState();
+}
+
+class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateMixin {
+  final AnimationManager _animationManager = AnimationManager();
+  final PianoAudioService _pianoAudioService = PianoAudioService();
+  static const double _basePixelsPerTick = 0.35;
+  static const Duration _autoScrollInterval = Duration(milliseconds: 16);
+  static const double _staffTop = 60;
+  static const double _leftMargin = 80;
+
+  double get _pixelsPerTick => _basePixelsPerTick * _noteSpacingScale.value;
+
+  late final AnimationController _repaintController;
+  late final ScrollController _scrollController;
+  Timer? _autoScrollTimer;
+  DateTime? _lastAutoScrollFrame;
+  bool _isPlaying = false;
+
+  int _currentScore = 0;
+  int _currentCombo = 0;
+  int _maxCombo = 0;
+  Set<int> _hitNoteIndices = {};
+  List<_HitWindowState> _hitHistory = [];
+
+  MusicScore? _loadedScore;
+  String _status = 'Cargue un archivo MusicXML para comenzar.';
+  bool _isLoading = false;
+  bool _audioReady = false;
+  double _currentViewportWidth = 0.0;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _repaintController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1000),
+    )
+      ..addListener(() {
+        if (mounted) setState(() {});
+      })
+      ..repeat();
+
+    _scrollController = ScrollController();
+
+    _initializeAudio();
+
+    // Cargar archivo precargado si se proporcionó
+    if (widget.preloadedContent != null) {
+      _loadPreloadedContent(widget.preloadedContent!);
+    } else if (widget.preloadedFilePath != null) {
+      _loadPreloadedFile(widget.preloadedFilePath!);
+    }
+  }
+
+  Future<void> _loadPreloadedContent(String content) async {
+    setState(() {
+      _isLoading = true;
+      _status = 'Cargando archivo...';
+    });
+
+    try {
+      final score = MusicXMLParser.parse(content);
+      if (mounted) {
+        setState(() {
+          _loadedScore = score;
+          _isPlaying = false;
+          _status = '';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _status = 'Error al cargar archivo: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _loadPreloadedFile(String filePath) async {
+    setState(() {
+      _isLoading = true;
+      _status = 'Cargando archivo...';
+    });
+
+    try {
+      final content = await File(filePath).readAsString();
+      final score = MusicXMLParser.parse(content);
+      if (mounted) {
+        setState(() {
+          _loadedScore = score;
+          _isPlaying = false;
+          _status = '';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _status = 'Error al cargar archivo: $e';
+        });
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _initializeAudio() async {
+    try {
+      await _pianoAudioService.initialize();
+      if (mounted) {
+        setState(() {
+          _audioReady = true;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _audioReady = false;
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _stopAutoScroll();
+    _repaintController.dispose();
+    _scrollController.dispose();
+    _pianoAudioService.dispose();
+    super.dispose();
+  }
+
+  void _startAutoScrollForLoadedScore() {
+    final score = _loadedScore;
+    if (score == null) return;
+
+    _stopAutoScroll();
+    _lastAutoScrollFrame = DateTime.now();
+
+    _autoScrollTimer = Timer.periodic(_autoScrollInterval, (_) {
+      if (!mounted || !_scrollController.hasClients) return;
+
+      // Mantener velocidad coherente con el espaciado horizontal calibrado.
+      final ticksPerSecond = (TicksEngine.TPQN * score.bpm) / 60.0;
+      final pixelsPerSecond = ticksPerSecond * _pixelsPerTick;
+
+      final now = DateTime.now();
+      final last = _lastAutoScrollFrame ?? now;
+      _lastAutoScrollFrame = now;
+
+      final dtSeconds = now.difference(last).inMicroseconds / 1000000.0;
+      if (dtSeconds <= 0) return;
+
+      final currentOffset = _scrollController.offset;
+      final maxOffset = _scrollController.position.maxScrollExtent;
+      final nextOffset = currentOffset + (pixelsPerSecond * dtSeconds);
+
+      if (nextOffset >= maxOffset) {
+        _scrollController.jumpTo(maxOffset);
+        _stopAutoScroll();
+        if (mounted) {
+          setState(() {
+            _isPlaying = false;
+          });
+        }
+        return;
+      }
+
+      _scrollController.jumpTo(nextOffset);
+    });
+  }
+
+  void _stopAutoScroll() {
+    _autoScrollTimer?.cancel();
+    _autoScrollTimer = null;
+    _lastAutoScrollFrame = null;
+  }
+
+  void _startFromBeginning() {
+    if (_loadedScore == null) return;
+    if (_scrollController.hasClients) {
+      _scrollController.jumpTo(0);
+    }
+    _currentScore = 0;
+    _currentCombo = 0;
+    _maxCombo = 0;
+    _hitNoteIndices.clear();
+    _hitHistory.clear();
+    setState(() {
+      _isPlaying = true;
+    });
+    _startAutoScrollForLoadedScore();
+  }
+
+  void _handleNoteInput(String inputPitch) {
+    if (_loadedScore == null || !_isPlaying) return;
+
+    final staticHitLineX = _staticHitLineX(_loadedScore!, _currentViewportWidth);
+    final feedback = _computeHitWindowFeedback(_loadedScore!, staticHitLineX);
+
+    // Solo registrar si hay una nota en zona de acierto y no fue tocada
+    if (feedback.state == _HitWindowState.none) return;
+
+    final scrollOffset =
+        _scrollController.hasClients ? _scrollController.offset : 0.0;
+
+    NoteModel? hitNote;
+    int hitNoteIndex = -1;
+
+    for (int i = 0; i < _loadedScore!.notes.length; i++) {
+      final note = _loadedScore!.notes[i];
+      if (_hitNoteIndices.contains(i)) continue; // Ya fue tocada
+
+      final noteScoreX = _scoreXForTick(_loadedScore!, note.absoluteTick, staticHitLineX);
+      final noteScreenX = noteScoreX - scrollOffset;
+      final deltaPx = (noteScreenX - staticHitLineX).abs();
+
+      if (deltaPx < 50.0) {
+        hitNote = note;
+        hitNoteIndex = i;
+        break;
+      }
+    }
+
+    if (hitNote == null || hitNoteIndex < 0) return;
+
+    _hitNoteIndices.add(hitNoteIndex);
+
+    final expectedPitch = _normalizePitch(hitNote.pitch);
+    final playedPitch = _normalizePitch(inputPitch);
+    final isCorrectPitch = expectedPitch == playedPitch;
+
+    if (isCorrectPitch && _audioReady) {
+      _pianoAudioService.playNote(expectedPitch);
+    }
+
+    // Calcular puntos según precisión
+    int points = 0;
+    switch (feedback.state) {
+      case _HitWindowState.perfect:
+        points = isCorrectPitch ? 100 : 20;
+        _currentCombo = isCorrectPitch ? _currentCombo + 1 : 0;
+        break;
+      case _HitWindowState.early:
+      case _HitWindowState.late:
+        points = isCorrectPitch ? 50 : 10;
+        _currentCombo = isCorrectPitch ? _currentCombo + 1 : 0;
+        break;
+      case _HitWindowState.none:
+        _currentCombo = 0;
+        break;
+    }
+
+    if (_currentCombo > _maxCombo) {
+      _maxCombo = _currentCombo;
+    }
+
+    _currentScore += points;
+
+    // Guardar el acierto en el historial
+    _hitHistory.add(feedback.state);
+    if (_hitHistory.length > 12) {
+      _hitHistory.removeAt(0); // Mantener solo últimos 12 aciertos
+    }
+
+    // Disparar animación de feedback
+    _animationManager.addHitFeedback(
+      Offset(staticHitLineX, _staffTop + 2 * StaffRenderer.SPACE_HEIGHT),
+      !isCorrectPitch
+        ? HitQuality.miss
+        : feedback.state == _HitWindowState.perfect
+          ? HitQuality.perfect
+          : feedback.state == _HitWindowState.early || feedback.state == _HitWindowState.late
+              ? HitQuality.good
+              : HitQuality.miss,
+    );
+
+    _animationManager.addAccuracyAnimation(
+      Offset(staticHitLineX, _staffTop + 2 * StaffRenderer.SPACE_HEIGHT),
+      !isCorrectPitch
+        ? HitQuality.miss
+        : feedback.state == _HitWindowState.perfect
+          ? HitQuality.perfect
+          : feedback.state == _HitWindowState.early || feedback.state == _HitWindowState.late
+              ? HitQuality.good
+              : HitQuality.miss,
+      0,
+    );
+
+    if (isCorrectPitch && _currentCombo >= 5) {
+      _animationManager.addComboAnimation(
+        Offset(staticHitLineX, _staffTop + 2 * StaffRenderer.SPACE_HEIGHT),
+        _currentCombo,
+      );
+    }
+
+    setState(() {});
+  }
+
+  String _normalizePitch(String pitch) {
+    var p = pitch.trim().toUpperCase();
+    if (p.isEmpty) return p;
+    p = p.replaceAll('♯', '#').replaceAll('♭', 'B');
+    final match = RegExp(r'^([A-G])([#B]?)(\d)$').firstMatch(p);
+    if (match == null) return p;
+
+    final note = match.group(1)!;
+    final accidental = match.group(2) ?? '';
+    final octave = int.parse(match.group(3)!);
+
+    const semitone = {
+      'C': 0,
+      'D': 2,
+      'E': 4,
+      'F': 5,
+      'G': 7,
+      'A': 9,
+      'B': 11,
+    };
+
+    var value = semitone[note]! + (octave * 12);
+    if (accidental == '#') value += 1;
+    if (accidental == 'B') value -= 1;
+
+    final normalizedOctave = value ~/ 12;
+    final normalizedClass = value % 12;
+    const names = {
+      0: 'C',
+      1: 'C#',
+      2: 'D',
+      3: 'D#',
+      4: 'E',
+      5: 'F',
+      6: 'F#',
+      7: 'G',
+      8: 'G#',
+      9: 'A',
+      10: 'A#',
+      11: 'B',
+    };
+
+    return '${names[normalizedClass]}$normalizedOctave';
+  }
+
+  int _ticksPerMeasure(TimeSignature timeSignature) {
+    return (TicksEngine.TPQN * timeSignature.numerator * 4) ~/
+        timeSignature.denominator;
+  }
+
+  double _scoreXForTick(MusicScore score, int absoluteTick, double hitLineX) {
+    final baseTick = score.notes.first.absoluteTick;
+    return hitLineX + ((absoluteTick - baseTick) * _pixelsPerTick);
+  }
+
+  _HitWindowFeedback _computeHitWindowFeedback(MusicScore score, double hitLineX) {
+    if (score.notes.isEmpty) {
+      return const _HitWindowFeedback(state: _HitWindowState.none, deltaMs: 0);
+    }
+
+    final scrollOffset =
+        _scrollController.hasClients ? _scrollController.offset : 0.0;
+
+    NoteModel? closestNote;
+    double closestDeltaPx = double.infinity;
+
+    for (final note in score.notes) {
+      final noteScoreX = _scoreXForTick(score, note.absoluteTick, hitLineX);
+      final noteScreenX = noteScoreX - scrollOffset;
+      final deltaPx = noteScreenX - hitLineX;
+
+      if (deltaPx.abs() < closestDeltaPx.abs()) {
+        closestDeltaPx = deltaPx;
+        closestNote = note;
+      }
+    }
+
+    if (closestNote == null) {
+      return const _HitWindowFeedback(state: _HitWindowState.none, deltaMs: 0);
+    }
+
+    final deltaTicks = closestDeltaPx / _pixelsPerTick;
+    final deltaMs =
+        (deltaTicks / TicksEngine.TPQN) * (60000.0 / score.bpm.toDouble());
+    final absMs = deltaMs.abs();
+
+    if (absMs <= 45.0) {
+      return _HitWindowFeedback(
+        state: _HitWindowState.perfect,
+        deltaMs: deltaMs,
+        notePitch: closestNote.pitch,
+      );
+    }
+
+    if (absMs <= 140.0) {
+      return _HitWindowFeedback(
+        state: deltaMs > 0 ? _HitWindowState.early : _HitWindowState.late,
+        deltaMs: deltaMs,
+        notePitch: closestNote.pitch,
+      );
+    }
+
+    return _HitWindowFeedback(
+      state: _HitWindowState.none,
+      deltaMs: deltaMs,
+      notePitch: closestNote.pitch,
+    );
+  }
+
+  Color _feedbackColor(_HitWindowState state) {
+    switch (state) {
+      case _HitWindowState.perfect:
+        return const Color(0xFF2E7D32);
+      case _HitWindowState.early:
+      case _HitWindowState.late:
+        return const Color(0xFFF9A825);
+      case _HitWindowState.none:
+        return Colors.red;
+    }
+  }
+
+  String _feedbackText(_HitWindowFeedback feedback) {
+    final note = feedback.notePitch ?? '-';
+    final ms = feedback.deltaMs.abs().toStringAsFixed(0);
+
+    switch (feedback.state) {
+      case _HitWindowState.perfect:
+        return 'Perfecto ($note · ${ms}ms)';
+      case _HitWindowState.early:
+        return 'Temprano ($note · +${ms}ms)';
+      case _HitWindowState.late:
+        return 'Tarde ($note · -${ms}ms)';
+      case _HitWindowState.none:
+        return 'En espera ($note · ${ms}ms)';
+    }
+  }
+
+  double _perfectWindowHalfWidthPx(MusicScore score) {
+    final pixelsPerSecond = (TicksEngine.TPQN * score.bpm / 60.0) * _pixelsPerTick;
+    return pixelsPerSecond * 0.045; // 45ms
+  }
+
+  double _staticHitLineX(MusicScore score, double viewportWidth) {
+    if (score.notes.isEmpty) return _leftMargin + 180.0;
+
+    // Punto base de referencia: primera nota exactamente en la barra roja.
+    final baseHitLineX = _leftMargin + 180.0;
+
+    if (viewportWidth <= 0) return baseHitLineX;
+
+    // Mínimo: posición actual. Máximo: mitad de la pantalla.
+    final maxHitLineX = math.max(baseHitLineX, viewportWidth * 0.5);
+    final t = _musicStartOffsetScale.value.clamp(
+      _minMusicStartOffsetScale,
+      _maxMusicStartOffsetScale,
+    );
+    return baseHitLineX + ((maxHitLineX - baseHitLineX) * t);
+  }
+
+  Future<void> _loadFromAsset() async {
+    setState(() {
+      _isLoading = true;
+      _status = 'Cargando archivo de ejemplo...';
+    });
+
+    try {
+      final xml = await rootBundle.loadString('assets/sample.musicxml');
+      final score = MusicXMLParser.parse(xml);
+      setState(() {
+        _loadedScore = score;
+        _isPlaying = false;
+        _status = '';
+      });
+    } catch (e) {
+      setState(() {
+        _status = 'Error al parsear archivo de ejemplo: $e';
+      });
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  Future<void> _pickFile() async {
+    setState(() {
+      _isLoading = true;
+      _status = 'Seleccionando archivo...';
+    });
+
+    try {
+      final result = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['xml', 'musicxml'],
+      );
+
+      if (result == null || result.files.isEmpty) {
+        setState(() {
+          _status = 'No se seleccionó ningún archivo.';
+        });
+        return;
+      }
+
+      final path = result.files.single.path;
+      if (path == null) {
+        setState(() {
+          _status = 'Ruta de archivo no disponible.';
+        });
+        return;
+      }
+
+      final content = await File(path).readAsString();
+      final score = MusicXMLParser.parse(content);
+
+      setState(() {
+        _loadedScore = score;
+        _isPlaying = false;
+        _status = '';
+      });
+    } catch (e) {
+      setState(() {
+        _status = 'Error al cargar archivo: $e';
+      });
+    } finally {
+      setState(() {
+        _isLoading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: _isLoading ? null : _loadFromAsset,
+                    child: const Text('Cargar ejemplo'),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: ElevatedButton(
+                    onPressed: _isLoading ? null : _pickFile,
+                    child: const Text('Seleccionar archivo'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            if (_isLoading) ...[
+              const Center(child: CircularProgressIndicator()),
+              const SizedBox(height: 16),
+            ],
+            if (_status.isNotEmpty) ...[
+              Text(_status),
+              const SizedBox(height: 16),
+            ],
+            if (_loadedScore != null) ...[
+              Row(
+                children: [
+                  ElevatedButton.icon(
+                    onPressed: _isPlaying ? null : _startFromBeginning,
+                    icon: const Icon(Icons.play_arrow),
+                    label: const Text('Iniciar'),
+                  ),
+                  const SizedBox(width: 10),
+                  if (_isPlaying)
+                    const Text(
+                      'Reproduciendo...',
+                      style: TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text('Tempo (BPM): ${_loadedScore!.bpm}'),
+              const SizedBox(height: 16),
+              Text(
+                'Puntuación: $_currentScore | Combo: $_currentCombo | Máx: $_maxCombo',
+                textAlign: TextAlign.center,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Expanded(
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.08),
+                        blurRadius: 12,
+                        offset: const Offset(0, 6),
+                      ),
+                    ],
+                  ),
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final maxTick = _loadedScore!.getTotalTicks();
+                      final minWidth = constraints.maxWidth;
+                      _currentViewportWidth = constraints.maxWidth;
+                      final calculatedWidth =
+                          (maxTick * _pixelsPerTick) + 160; // margen interno
+                      final width = calculatedWidth < minWidth
+                          ? minWidth
+                          : calculatedWidth;
+
+                      final staticHitLineX = _staticHitLineX(_loadedScore!, _currentViewportWidth);
+                        final feedback =
+                          _computeHitWindowFeedback(_loadedScore!, staticHitLineX);
+                        final feedbackColor = _feedbackColor(feedback.state);
+                        final perfectWindowHalfWidth =
+                          _perfectWindowHalfWidthPx(_loadedScore!);
+
+                      return Stack(
+                        children: [
+                          Scrollbar(
+                            controller: _scrollController,
+                            thumbVisibility: true,
+                            trackVisibility: true,
+                            thickness: 10,
+                            radius: const Radius.circular(8),
+                            child: SingleChildScrollView(
+                              controller: _scrollController,
+                              scrollDirection: Axis.horizontal,
+                              child: SizedBox(
+                                width: width,
+                                child: CustomPaint(
+                                  painter: SMuFLRenderer(
+                                    timeSignature: _loadedScore!.timeSignature,
+                                    keySignature: _loadedScore!.keySignature,
+                                    visibleNotes: _loadedScore!.notes,
+                                    animationManager: _animationManager,
+                                    ticksEngine:
+                                        TicksEngine(initialBpm: _loadedScore!.bpm),
+                                    pixelsPerTick: _pixelsPerTick,
+                                    hitLineXOverride: staticHitLineX,
+                                    showHitLine: false,
+                                  ),
+                                  child: const SizedBox.expand(),
+                                ),
+                              ),
+                            ),
+                          ),
+                          IgnorePointer(
+                            child: CustomPaint(
+                              painter: _StaticBeatLinePainter(
+                                hitLineX: staticHitLineX,
+                                staffTop: _staffTop,
+                                beatColor: feedbackColor,
+                                perfectWindowHalfWidth: perfectWindowHalfWidth,
+                              ),
+                              child: const SizedBox.expand(),
+                            ),
+                          ),
+                          Positioned(
+                            top: 8,
+                            right: 10,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              decoration: BoxDecoration(
+                                color: feedbackColor.withOpacity(0.12),
+                                borderRadius: BorderRadius.circular(10),
+                                border: Border.all(
+                                  color: feedbackColor.withOpacity(0.55),
+                                ),
+                              ),
+                              child: Text(
+                                _feedbackText(feedback),
+                                style: TextStyle(
+                                  color: feedbackColor,
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            top: 50,
+                            left: 10,
+                            right: 10,
+                            child: Wrap(
+                              spacing: 6,
+                              children: _hitHistory.map((state) {
+                                Color hitColor;
+                                switch (state) {
+                                  case _HitWindowState.perfect:
+                                    hitColor = const Color(0xFF2E7D32);
+                                    break;
+                                  case _HitWindowState.early:
+                                  case _HitWindowState.late:
+                                    hitColor = const Color(0xFFF9A825);
+                                    break;
+                                  case _HitWindowState.none:
+                                    hitColor = Colors.red;
+                                    break;
+                                }
+                                return Container(
+                                  width: 16,
+                                  height: 16,
+                                  decoration: BoxDecoration(
+                                    color: hitColor,
+                                    shape: BoxShape.circle,
+                                  ),
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 150,
+                child: _PianoInput(
+                  enabled: _isPlaying,
+                  onNotePressed: _handleNoteInput,
+                ),
+              ),
+              const SizedBox(height: 12),
+            ],
+            const Spacer(),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Volver'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PianoInput extends StatelessWidget {
+  final bool enabled;
+  final ValueChanged<String> onNotePressed;
+
+  const _PianoInput({
+    required this.enabled,
+    required this.onNotePressed,
+  });
+
+  static const List<String> _notes = [
+    'C4',
+    'C#4',
+    'D4',
+    'D#4',
+    'E4',
+    'F4',
+    'F#4',
+    'G4',
+    'G#4',
+    'A4',
+    'A#4',
+    'B4',
+    'C5',
+    'C#5',
+    'D5',
+    'D#5',
+    'E5',
+    'F5',
+    'F#5',
+    'G5',
+    'G#5',
+    'A5',
+    'A#5',
+    'B5',
+    'C6',
+    'C#6',
+    'D6',
+    'D#6',
+    'E6',
+    'F6',
+    'F#6',
+    'G6',
+    'G#6',
+    'A6',
+    'A#6',
+    'B6',
+  ];
+
+  bool _isBlack(String n) => n.contains('#');
+
+  @override
+  Widget build(BuildContext context) {
+    final whiteNotes = _notes.where((n) => !_isBlack(n)).toList();
+    final blackNotes = _notes.where(_isBlack).toList();
+
+    return Container(
+      decoration: BoxDecoration(
+        color: const Color(0xFFF2F4F8),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFD9DEE8)),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+          child: Stack(
+            children: [
+              Row(
+                children: whiteNotes.map((note) {
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 2),
+                    child: SizedBox(
+                      width: 44,
+                      child: ElevatedButton(
+                        onPressed: enabled ? () => onNotePressed(note) : null,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: Colors.black87,
+                          padding: const EdgeInsets.only(bottom: 6),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(6),
+                            side: const BorderSide(color: Color(0xFFCFD6E3)),
+                          ),
+                        ),
+                        child: Align(
+                          alignment: Alignment.bottomCenter,
+                          child: Text(
+                            note,
+                            style: const TextStyle(fontSize: 10),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+              Positioned.fill(
+                child: IgnorePointer(
+                  ignoring: !enabled,
+                  child: Row(
+                    children: List.generate(whiteNotes.length, (index) {
+                      final note = whiteNotes[index];
+                      final nextNote = index + 1 < whiteNotes.length
+                          ? whiteNotes[index + 1]
+                          : null;
+                      final semitoneBetween = _semitone(nextNote) - _semitone(note);
+                      final hasBlack = nextNote != null && semitoneBetween == 2;
+
+                      return SizedBox(
+                        width: 48,
+                        child: Stack(
+                          children: [
+                            if (hasBlack)
+                              Positioned(
+                                right: -10,
+                                top: 0,
+                                child: GestureDetector(
+                                  onTap: enabled
+                                      ? () {
+                                          final black = _sharpBetween(note, nextNote);
+                                          if (black != null) onNotePressed(black);
+                                        }
+                                      : null,
+                                  child: Container(
+                                    width: 20,
+                                    height: 86,
+                                    decoration: BoxDecoration(
+                                      color: enabled
+                                          ? const Color(0xFF111318)
+                                          : const Color(0xFF5A5F6B),
+                                      borderRadius: BorderRadius.circular(4),
+                                      boxShadow: const [
+                                        BoxShadow(
+                                          color: Color(0x33000000),
+                                          blurRadius: 3,
+                                          offset: Offset(0, 2),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      );
+                    }),
+                  ),
+                ),
+              ),
+              if (blackNotes.isNotEmpty)
+                const SizedBox.shrink(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  int _semitone(String? pitch) {
+    if (pitch == null) return 0;
+    final m = RegExp(r'^([A-G])(\d)$').firstMatch(pitch);
+    if (m == null) return 0;
+    const map = {
+      'C': 0,
+      'D': 2,
+      'E': 4,
+      'F': 5,
+      'G': 7,
+      'A': 9,
+      'B': 11,
+    };
+    return (int.parse(m.group(2)!) * 12) + map[m.group(1)]!;
+  }
+
+  String? _sharpBetween(String left, String? right) {
+    if (right == null) return null;
+    final m = RegExp(r'^([A-G])(\d)$').firstMatch(left);
+    if (m == null) return null;
+    final note = m.group(1)!;
+    final octave = m.group(2)!;
+    if (note == 'E' || note == 'B') return null;
+    return '$note#$octave';
+  }
+}
+
+class _StaticBeatLinePainter extends CustomPainter {
+  final double hitLineX;
+  final double staffTop;
+  final Color beatColor;
+  final double perfectWindowHalfWidth;
+
+  const _StaticBeatLinePainter({
+    required this.hitLineX,
+    required this.staffTop,
+    required this.beatColor,
+    required this.perfectWindowHalfWidth,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (size.width == 0 || size.height == 0) return;
+
+    final windowRect = Rect.fromLTRB(
+      hitLineX - perfectWindowHalfWidth,
+      staffTop,
+      hitLineX + perfectWindowHalfWidth,
+      staffTop + 4 * StaffRenderer.SPACE_HEIGHT,
+    );
+    canvas.drawRect(
+      windowRect,
+      Paint()..color = beatColor.withOpacity(0.12),
+    );
+
+    canvas.drawLine(
+      Offset(hitLineX, staffTop),
+      Offset(hitLineX, staffTop + 4 * StaffRenderer.SPACE_HEIGHT),
+      Paint()
+        ..color = beatColor.withOpacity(0.9)
+        ..strokeWidth = 3.0,
+    );
+
+    final textPainter = TextPainter(
+      text: TextSpan(
+        text: 'BEAT',
+        style: TextStyle(
+          color: beatColor,
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    textPainter.layout();
+    textPainter.paint(
+      canvas,
+      Offset(hitLineX - textPainter.width / 2, 40),
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _StaticBeatLinePainter oldDelegate) {
+    return oldDelegate.hitLineX != hitLineX ||
+        oldDelegate.staffTop != staffTop ||
+        oldDelegate.beatColor != beatColor ||
+        oldDelegate.perfectWindowHalfWidth != perfectWindowHalfWidth;
+  }
+}
+
+/// Pantalla de configuración
+class SettingsScreen extends StatefulWidget {
+  const SettingsScreen({Key? key}) : super(key: key);
+
+  @override
+  State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  late double _spacingScale;
+  late double _startOffsetScale;
+
+  @override
+  void initState() {
+    super.initState();
+    _spacingScale = _noteSpacingScale.value;
+    _startOffsetScale = _musicStartOffsetScale.value;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Configuración'),
+      ),
+      body: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text(
+              'Calibración de Espaciado Horizontal',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Ajusta la distancia entre notas. 100% (derecha) es el valor actual por defecto y 75% (izquierda) es el mínimo.',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 18),
+            Row(
+              children: [
+                const Text('75%'),
+                Expanded(
+                  child: Slider(
+                    min: _minNoteSpacingScale,
+                    max: _maxNoteSpacingScale,
+                    divisions: 25,
+                    value: _spacingScale,
+                    label: '${(_spacingScale * 100).round()}%',
+                    onChanged: (value) {
+                      setState(() {
+                        _spacingScale = value;
+                      });
+                      _noteSpacingScale.value = value;
+                    },
+                  ),
+                ),
+                const Text('100%'),
+              ],
+            ),
+            Text(
+              'Valor actual: ${(_spacingScale * 100).round()}%',
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 24),
+            const Divider(height: 1),
+            const SizedBox(height: 18),
+            const Text(
+              'Calibración del Inicio de la Música',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Mínimo (izquierda): posición actual. Máximo (derecha): mitad de pantalla.',
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                const Text('Actual'),
+                Expanded(
+                  child: Slider(
+                    min: _minMusicStartOffsetScale,
+                    max: _maxMusicStartOffsetScale,
+                    divisions: 20,
+                    value: _startOffsetScale,
+                    label: '${(_startOffsetScale * 100).round()}%',
+                    onChanged: (value) {
+                      setState(() {
+                        _startOffsetScale = value;
+                      });
+                      _musicStartOffsetScale.value = value;
+                    },
+                  ),
+                ),
+                const Text('Mitad'),
+              ],
+            ),
+            Text(
+              'Desplazamiento de inicio: ${(_startOffsetScale * 100).round()}%',
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Volver'),
+            ),
+          ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Pantalla de selección de niveles (archivos MusicXML precargados)
+class LevelSelectScreen extends StatefulWidget {
+  const LevelSelectScreen({Key? key}) : super(key: key);
+
+  @override
+  State<LevelSelectScreen> createState() => _LevelSelectScreenState();
+}
+
+class _LevelSelectScreenState extends State<LevelSelectScreen> {
+  final MusicXmlPreloadService _preloadService = MusicXmlPreloadService();
+  late Future<List<PreloadedMusicXmlFile>> _filesFuture;
+  PreloadedMusicXmlFile? _selectedFile;
+
+  @override
+  void initState() {
+    super.initState();
+    _filesFuture = _loadAvailableLevels();
+  }
+
+  Future<List<PreloadedMusicXmlFile>> _loadAvailableLevels() async {
+    try {
+      // Primero intenta con el servicio de descubrimiento
+      final discoveredFiles = await _preloadService.discover();
+      if (discoveredFiles.isNotEmpty) {
+        return discoveredFiles;
+      }
+
+      // Si no encuentra archivos, intenta cargar desde assets
+      return await _loadLevelsFromAssets();
+    } catch (e) {
+      // En caso de error, intenta cargar desde assets
+      return await _loadLevelsFromAssets();
+    }
+  }
+
+  Future<List<PreloadedMusicXmlFile>> _loadLevelsFromAssets() async {
+    try {
+      final manifestJson =
+          await rootBundle.loadString('AssetManifest.json');
+      final manifest = jsonDecode(manifestJson) as Map<String, dynamic>;
+
+      final musicxmlFiles = manifest.keys
+          .where((String key) =>
+              key.startsWith('musicxml_preload/') &&
+              (key.endsWith('.xml') || key.endsWith('.musicxml')))
+          .toList();
+
+      musicxmlFiles.sort();
+
+      return musicxmlFiles
+          .map((path) {
+            final fileName = path.split('/').last;
+            return PreloadedMusicXmlFile(
+              name: fileName,
+              path: path,
+            );
+          })
+          .toList();
+    } catch (e) {
+      return [];
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Seleccionar Nivel'),
+      ),
+      body: FutureBuilder<List<PreloadedMusicXmlFile>>(
+        future: _filesFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text('Buscando archivos MusicXML...'),
+                ],
+              ),
+            );
+          }
+
+          if (snapshot.hasError) {
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Text('Error: ${snapshot.error}', textAlign: TextAlign.center),
+                  const SizedBox(height: 24),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Volver'),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          final files = snapshot.data ?? [];
+
+          if (files.isEmpty) {
+            return Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Icon(Icons.info, size: 48, color: Colors.grey),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'No se encontraron archivos MusicXML\n\nColoca archivos .xml o .musicxml\nen la carpeta musicxml_preload/',
+                    style: TextStyle(fontSize: 16),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 32),
+                  ElevatedButton.icon(
+                    onPressed: () {
+                      setState(() {
+                        _filesFuture = _loadAvailableLevels();
+                      });
+                    },
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Reintentar'),
+                  ),
+                  const SizedBox(height: 16),
+                  ElevatedButton(
+                    onPressed: () => Navigator.pop(context),
+                    child: const Text('Volver'),
+                  ),
+                ],
+              ),
+            );
+          }
+
+          return Column(
+            children: [
+              Expanded(
+                child: ListView.builder(
+                  itemCount: files.length,
+                  itemBuilder: (context, index) {
+                    final file = files[index];
+                    return Card(
+                      margin:
+                          const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      child: ListTile(
+                        selected: _selectedFile == file,
+                        selectedTileColor: Theme.of(context)
+                            .colorScheme
+                            .primary
+                            .withOpacity(0.14),
+                        leading: const Icon(Icons.music_note),
+                        title: Text(file.name),
+                        trailing: _selectedFile == file
+                            ? const Icon(Icons.check_circle, color: Colors.green)
+                            : null,
+                        onTap: () {
+                          setState(() {
+                            _selectedFile = file;
+                          });
+                        },
+                      ),
+                    );
+                  },
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      _selectedFile == null
+                          ? 'Seleccione un nivel para activar el botón Iniciar.'
+                          : 'Nivel seleccionado: ${_selectedFile!.name}',
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                    const SizedBox(height: 12),
+                    ElevatedButton.icon(
+                      icon: const Icon(Icons.play_arrow),
+                      label: const Text('Iniciar'),
+                      onPressed: _selectedFile == null
+                          ? null
+                          : () async {
+                              try {
+                                final file = _selectedFile!;
+                                if (file.path.startsWith('musicxml_preload/')) {
+                                  final content =
+                                      await rootBundle.loadString(file.path);
+                                  if (!mounted) return;
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => GameScreen(
+                                        preloadedContent: content,
+                                        fileName: file.name,
+                                      ),
+                                    ),
+                                  );
+                                } else {
+                                  if (!mounted) return;
+                                  Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) => GameScreen(
+                                        preloadedFilePath: file.path,
+                                      ),
+                                    ),
+                                  );
+                                }
+                              } catch (e) {
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content:
+                                        Text('Error al iniciar nivel: $e'),
+                                  ),
+                                );
+                              }
+                            },
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Pantalla de resultados
+class ResultsScreen extends StatelessWidget {
+  final String summary;
+
+  const ResultsScreen({
+    Key? key,
+    required this.summary,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Resultados'),
+      ),
+      body: Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            const Text(
+              '📊 Results Screen - Próximamente',
+              style: TextStyle(fontSize: 24),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            ElevatedButton(
+              onPressed: () => Navigator.popUntil(context, (route) => route.isFirst),
+              child: const Text('Volver al Menú'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
