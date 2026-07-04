@@ -6,11 +6,14 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:provider/provider.dart';
 
 import '../audio/piano_audio_service.dart';
 import '../core/core.dart';
 import '../parsers/parsers.dart';
 import '../services/musicxml_preload_service.dart';
+// import '../services/exercise_loader_service.dart'; // ELIMINADO (no se usa)
+import '../providers/exercise_provider.dart';
 import '../visual_engine/visual_engine.dart';
 
 const double _minNoteSpacingScale = 0.75;
@@ -39,12 +42,14 @@ class GameScreen extends StatefulWidget {
   final String? preloadedFilePath;
   final String? preloadedContent;
   final String? fileName;
+  final Exercise? exercise;
 
   const GameScreen({
     Key? key,
     this.preloadedFilePath,
     this.preloadedContent,
     this.fileName,
+    this.exercise,
   }) : super(key: key);
 
   @override
@@ -96,7 +101,6 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
 
     _initializeAudio();
 
-    // Cargar archivo precargado si se proporcionó
     if (widget.preloadedContent != null) {
       _loadPreloadedContent(widget.preloadedContent!);
     } else if (widget.preloadedFilePath != null) {
@@ -117,6 +121,9 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
           _loadedScore = score;
           _isPlaying = false;
           _status = '';
+          if (widget.exercise != null) {
+            _status = '🎵 ${widget.exercise!.title} - ${widget.exercise!.composer}';
+          }
         });
       }
     } catch (e) {
@@ -201,7 +208,6 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     _autoScrollTimer = Timer.periodic(_autoScrollInterval, (_) {
       if (!mounted || !_scrollController.hasClients) return;
 
-      // Mantener velocidad coherente con el espaciado horizontal calibrado.
       final ticksPerSecond = (TicksEngine.TPQN * score.bpm) / 60.0;
       final pixelsPerSecond = ticksPerSecond * _pixelsPerTick;
 
@@ -223,12 +229,98 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
           setState(() {
             _isPlaying = false;
           });
+          _finishGame();
         }
         return;
       }
 
       _scrollController.jumpTo(nextOffset);
     });
+  }
+
+  void _finishGame() {
+    if (widget.exercise != null && mounted) {
+      final provider = context.read<ExerciseProvider>();
+      final updatedExercise = widget.exercise!.copyWith(
+        timesCompleted: widget.exercise!.timesCompleted + 1,
+        bestScore: _currentScore > widget.exercise!.bestScore
+            ? _currentScore.toDouble()
+            : widget.exercise!.bestScore,
+      );
+      provider.updateExercise(updatedExercise);
+      _showResultsDialog();
+    }
+  }
+
+  void _showResultsDialog() {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('🎉 ¡Ejercicio Completado!'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.emoji_events, size: 64, color: Colors.amber),
+            const SizedBox(height: 16),
+            Text(
+              'Puntuación: $_currentScore',
+              style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Combo Máximo: $_maxCombo',
+              style: const TextStyle(fontSize: 18),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Notas Acertadas: ${_hitNoteIndices.length}',
+              style: const TextStyle(fontSize: 18),
+            ),
+            const SizedBox(height: 16),
+            if (widget.exercise != null) ...[
+              const Divider(),
+              Text(
+                '🏆 Mejor Puntuación: ${widget.exercise!.bestScore.toStringAsFixed(0)}',
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              ),
+              Text(
+                '✅ Veces completado: ${widget.exercise!.timesCompleted}',
+                style: const TextStyle(fontSize: 14),
+              ),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              Navigator.pop(context);
+            },
+            child: const Text('Volver a Ejercicios'),
+          ),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              _resetAndRestart();
+            },
+            child: const Text('Reintentar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _resetAndRestart() {
+    setState(() {
+      _currentScore = 0;
+      _currentCombo = 0;
+      _maxCombo = 0;
+      _hitNoteIndices.clear();
+      _hitHistory.clear();
+    });
+    _scrollController.jumpTo(0);
+    _startFromBeginning();
   }
 
   void _stopAutoScroll() {
@@ -259,7 +351,6 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     final staticHitLineX = _staticHitLineX(_loadedScore!, _currentViewportWidth);
     final feedback = _computeHitWindowFeedback(_loadedScore!, staticHitLineX);
 
-    // Solo registrar si hay una nota en zona de acierto y no fue tocada
     if (feedback.state == _HitWindowState.none) return;
 
     final scrollOffset =
@@ -270,7 +361,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
 
     for (int i = 0; i < _loadedScore!.notes.length; i++) {
       final note = _loadedScore!.notes[i];
-      if (_hitNoteIndices.contains(i)) continue; // Ya fue tocada
+      if (_hitNoteIndices.contains(i)) continue;
 
       final noteScoreX = _scoreXForTick(_loadedScore!, note.absoluteTick, staticHitLineX);
       final noteScreenX = noteScoreX - scrollOffset;
@@ -295,7 +386,6 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
       _pianoAudioService.playNote(expectedPitch);
     }
 
-    // Calcular puntos según precisión
     int points = 0;
     switch (feedback.state) {
       case _HitWindowState.perfect:
@@ -318,33 +408,31 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
 
     _currentScore += points;
 
-    // Guardar el acierto en el historial
     _hitHistory.add(feedback.state);
     if (_hitHistory.length > 12) {
-      _hitHistory.removeAt(0); // Mantener solo últimos 12 aciertos
+      _hitHistory.removeAt(0);
     }
 
-    // Disparar animación de feedback
     _animationManager.addHitFeedback(
       Offset(staticHitLineX, _staffTop + 2 * StaffRenderer.SPACE_HEIGHT),
       !isCorrectPitch
-        ? HitQuality.miss
-        : feedback.state == _HitWindowState.perfect
-          ? HitQuality.perfect
-          : feedback.state == _HitWindowState.early || feedback.state == _HitWindowState.late
-              ? HitQuality.good
-              : HitQuality.miss,
+          ? HitQuality.miss
+          : feedback.state == _HitWindowState.perfect
+              ? HitQuality.perfect
+              : feedback.state == _HitWindowState.early || feedback.state == _HitWindowState.late
+                  ? HitQuality.good
+                  : HitQuality.miss,
     );
 
     _animationManager.addAccuracyAnimation(
       Offset(staticHitLineX, _staffTop + 2 * StaffRenderer.SPACE_HEIGHT),
       !isCorrectPitch
-        ? HitQuality.miss
-        : feedback.state == _HitWindowState.perfect
-          ? HitQuality.perfect
-          : feedback.state == _HitWindowState.early || feedback.state == _HitWindowState.late
-              ? HitQuality.good
-              : HitQuality.miss,
+          ? HitQuality.miss
+          : feedback.state == _HitWindowState.perfect
+              ? HitQuality.perfect
+              : feedback.state == _HitWindowState.early || feedback.state == _HitWindowState.late
+                  ? HitQuality.good
+                  : HitQuality.miss,
       0,
     );
 
@@ -497,18 +585,16 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
 
   double _perfectWindowHalfWidthPx(MusicScore score) {
     final pixelsPerSecond = (TicksEngine.TPQN * score.bpm / 60.0) * _pixelsPerTick;
-    return pixelsPerSecond * 0.045; // 45ms
+    return pixelsPerSecond * 0.045;
   }
 
   double _staticHitLineX(MusicScore score, double viewportWidth) {
     if (score.notes.isEmpty) return _leftMargin + 180.0;
 
-    // Punto base de referencia: primera nota exactamente en la barra roja.
     final baseHitLineX = _leftMargin + 180.0;
 
     if (viewportWidth <= 0) return baseHitLineX;
 
-    // Mínimo: posición actual. Máximo: mitad de la pantalla.
     final maxHitLineX = math.max(baseHitLineX, viewportWidth * 0.5);
     final t = _musicStartOffsetScale.value.clamp(
       _minMusicStartOffsetScale,
@@ -589,220 +675,219 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
   }
 
   @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: _isLoading ? null : _loadFromAsset,
-                    child: const Text('Cargar ejemplo'),
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: ElevatedButton(
-                    onPressed: _isLoading ? null : _pickFile,
-                    child: const Text('Seleccionar archivo'),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            if (_isLoading) ...[
-              const Center(child: CircularProgressIndicator()),
-              const SizedBox(height: 16),
-            ],
-            if (_status.isNotEmpty) ...[
-              Text(_status),
-              const SizedBox(height: 16),
-            ],
-            if (_loadedScore != null) ...[
-              Row(
-                children: [
-                  ElevatedButton.icon(
-                    onPressed: _isPlaying ? null : _startFromBeginning,
-                    icon: const Icon(Icons.play_arrow),
-                    label: const Text('Iniciar'),
-                  ),
-                  const SizedBox(width: 10),
-                  if (_isPlaying)
-                    const Text(
-                      'Reproduciendo...',
-                      style: TextStyle(fontWeight: FontWeight.w600),
-                    ),
-                ],
+Widget build(BuildContext context) {
+  return Scaffold(
+    // AppBar completamente vacía (sin título, sin íconos, sin botones)
+    appBar: AppBar(
+      elevation: 0,
+      toolbarHeight: 0, // Ocultamos la AppBar
+      automaticallyImplyLeading: false, // Elimina el botón de retroceso automático
+    ),
+    body: Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      child: Column(
+        children: [
+          // Fila de botones: Volver (izquierda) y Play (derecha)
+          Row(
+            children: [
+              // Botón Volver
+              IconButton(
+                onPressed: () => Navigator.pop(context),
+                icon: const Icon(Icons.arrow_back, size: 28),
+                tooltip: 'Volver',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
               ),
-              const SizedBox(height: 10),
-              Text('Tempo (BPM): ${_loadedScore!.bpm}'),
-              const SizedBox(height: 16),
-              Text(
-                'Puntuación: $_currentScore | Combo: $_currentCombo | Máx: $_maxCombo',
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
+              const Spacer(),
+              // Botón Play
+              IconButton(
+                onPressed: _isPlaying ? null : _startFromBeginning,
+                icon: Icon(
+                  _isPlaying ? Icons.play_circle_outline : Icons.play_circle_filled,
+                  size: 36,
+                  color: _isPlaying ? Colors.grey : Theme.of(context).colorScheme.primary,
                 ),
+                tooltip: 'Iniciar',
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(),
               ),
-              const SizedBox(height: 12),
-              Expanded(
-                child: Container(
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.08),
-                        blurRadius: 12,
-                        offset: const Offset(0, 6),
-                      ),
-                    ],
-                  ),
-                  child: LayoutBuilder(
-                    builder: (context, constraints) {
-                      final maxTick = _loadedScore!.getTotalTicks();
-                      final minWidth = constraints.maxWidth;
-                      _currentViewportWidth = constraints.maxWidth;
-                      final calculatedWidth =
-                          (maxTick * _pixelsPerTick) + 160; // margen interno
-                      final width = calculatedWidth < minWidth
-                          ? minWidth
-                          : calculatedWidth;
+            ],
+          ),
+          const SizedBox(height: 4),
 
-                      final staticHitLineX = _staticHitLineX(_loadedScore!, _currentViewportWidth);
-                        final feedback =
-                          _computeHitWindowFeedback(_loadedScore!, staticHitLineX);
-                        final feedbackColor = _feedbackColor(feedback.state);
-                        final perfectWindowHalfWidth =
-                          _perfectWindowHalfWidthPx(_loadedScore!);
-
-                      return Stack(
-                        children: [
-                          Scrollbar(
-                            controller: _scrollController,
-                            thumbVisibility: true,
-                            trackVisibility: true,
-                            thickness: 10,
-                            radius: const Radius.circular(8),
-                            child: SingleChildScrollView(
-                              controller: _scrollController,
-                              scrollDirection: Axis.horizontal,
-                              child: SizedBox(
-                                width: width,
-                                child: CustomPaint(
-                                  painter: SMuFLRenderer(
-                                    timeSignature: _loadedScore!.timeSignature,
-                                    keySignature: _loadedScore!.keySignature,
-                                    visibleNotes: _loadedScore!.notes,
-                                    animationManager: _animationManager,
-                                    ticksEngine:
-                                        TicksEngine(initialBpm: _loadedScore!.bpm),
-                                    pixelsPerTick: _pixelsPerTick,
-                                    hitLineXOverride: staticHitLineX,
-                                    showHitLine: false,
-                                  ),
-                                  child: const SizedBox.expand(),
-                                ),
-                              ),
-                            ),
-                          ),
-                          IgnorePointer(
-                            child: CustomPaint(
-                              painter: _StaticBeatLinePainter(
-                                hitLineX: staticHitLineX,
-                                staffTop: _staffTop,
-                                beatColor: feedbackColor,
-                                perfectWindowHalfWidth: perfectWindowHalfWidth,
-                              ),
-                              child: const SizedBox.expand(),
-                            ),
-                          ),
-                          Positioned(
-                            top: 8,
-                            right: 10,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 6,
-                              ),
-                              decoration: BoxDecoration(
-                                color: feedbackColor.withOpacity(0.12),
-                                borderRadius: BorderRadius.circular(10),
-                                border: Border.all(
-                                  color: feedbackColor.withOpacity(0.55),
-                                ),
-                              ),
-                              child: Text(
-                                _feedbackText(feedback),
-                                style: TextStyle(
-                                  color: feedbackColor,
-                                  fontWeight: FontWeight.w700,
-                                  fontSize: 12,
-                                ),
-                              ),
-                            ),
-                          ),
-                          Positioned(
-                            top: 50,
-                            left: 10,
-                            right: 10,
-                            child: Wrap(
-                              spacing: 6,
-                              children: _hitHistory.map((state) {
-                                Color hitColor;
-                                switch (state) {
-                                  case _HitWindowState.perfect:
-                                    hitColor = const Color(0xFF2E7D32);
-                                    break;
-                                  case _HitWindowState.early:
-                                  case _HitWindowState.late:
-                                    hitColor = const Color(0xFFF9A825);
-                                    break;
-                                  case _HitWindowState.none:
-                                    hitColor = Colors.red;
-                                    break;
-                                }
-                                return Container(
-                                  width: 16,
-                                  height: 16,
-                                  decoration: BoxDecoration(
-                                    color: hitColor,
-                                    shape: BoxShape.circle,
-                                  ),
-                                );
-                              }).toList(),
-                            ),
-                          ),
-                        ],
+          // Partitura (ocupa el espacio restante)
+          Expanded(
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    if (_loadedScore == null) {
+                      return const Center(
+                        child: Text('Cargue un archivo MusicXML'),
                       );
-                    },
-                  ),
+                    }
+                    final maxTick = _loadedScore!.getTotalTicks();
+                    final minWidth = constraints.maxWidth;
+                    _currentViewportWidth = constraints.maxWidth;
+                    final calculatedWidth = (maxTick * _pixelsPerTick) + 160;
+                    final width = calculatedWidth < minWidth ? minWidth : calculatedWidth;
+
+                    final staticHitLineX = _staticHitLineX(_loadedScore!, _currentViewportWidth);
+                    final feedback = _computeHitWindowFeedback(_loadedScore!, staticHitLineX);
+                    final feedbackColor = _feedbackColor(feedback.state);
+                    final perfectWindowHalfWidth = _perfectWindowHalfWidthPx(_loadedScore!);
+
+                    return Stack(
+                      children: [
+                        Scrollbar(
+                          controller: _scrollController,
+                          thumbVisibility: true,
+                          trackVisibility: true,
+                          thickness: 8,
+                          radius: const Radius.circular(6),
+                          child: SingleChildScrollView(
+                            controller: _scrollController,
+                            scrollDirection: Axis.horizontal,
+                            child: SizedBox(
+                              width: width,
+                              child: CustomPaint(
+                                painter: SMuFLRenderer(
+                                  timeSignature: _loadedScore!.timeSignature,
+                                  keySignature: _loadedScore!.keySignature,
+                                  visibleNotes: _loadedScore!.notes,
+                                  animationManager: _animationManager,
+                                  ticksEngine: TicksEngine(initialBpm: _loadedScore!.bpm),
+                                  pixelsPerTick: _pixelsPerTick,
+                                  hitLineXOverride: staticHitLineX,
+                                  showHitLine: false,
+                                ),
+                                child: const SizedBox.expand(),
+                              ),
+                            ),
+                          ),
+                        ),
+                        IgnorePointer(
+                          child: CustomPaint(
+                            painter: _StaticBeatLinePainter(
+                              hitLineX: staticHitLineX,
+                              staffTop: _staffTop,
+                              beatColor: feedbackColor,
+                              perfectWindowHalfWidth: perfectWindowHalfWidth,
+                            ),
+                            child: const SizedBox.expand(),
+                          ),
+                        ),
+                        // Feedback mínimo en la esquina superior derecha
+                        Positioned(
+                          top: 4,
+                          right: 4,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: feedbackColor.withOpacity(0.15),
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: feedbackColor.withOpacity(0.5), width: 1),
+                            ),
+                            child: Text(
+                              _feedbackText(feedback),
+                              style: TextStyle(
+                                color: feedbackColor,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 10,
+                              ),
+                            ),
+                          ),
+                        ),
+                        // Historial de hits (círculos pequeños)
+                        Positioned(
+                          top: 32,
+                          left: 4,
+                          right: 4,
+                          child: Wrap(
+                            spacing: 3,
+                            children: _hitHistory.map((state) {
+                              Color hitColor;
+                              switch (state) {
+                                case _HitWindowState.perfect:
+                                  hitColor = const Color(0xFF2E7D32);
+                                  break;
+                                case _HitWindowState.early:
+                                case _HitWindowState.late:
+                                  hitColor = const Color(0xFFF9A825);
+                                  break;
+                                case _HitWindowState.none:
+                                  hitColor = Colors.red;
+                                  break;
+                              }
+                              return Container(
+                                width: 10,
+                                height: 10,
+                                decoration: BoxDecoration(
+                                  color: hitColor,
+                                  shape: BoxShape.circle,
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
                 ),
               ),
-              const SizedBox(height: 12),
-              SizedBox(
-                height: 150,
-                child: _PianoInput(
-                  enabled: _isPlaying,
-                  onNotePressed: _handleNoteInput,
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
-            const Spacer(),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Volver'),
             ),
-          ],
+          ),
+          const SizedBox(height: 4),
+
+          // Piano
+          SizedBox(
+            height: 120,
+            child: _PianoInput(
+              enabled: _isPlaying,
+              onNotePressed: _handleNoteInput,
+            ),
+          ),
+        ],
+      ),
+    ),
+  );
+}
+
+  Widget _buildInfoChip(String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          color: color,
+          fontWeight: FontWeight.w500,
         ),
       ),
     );
+  }
+
+  String _getDifficultyLabel(Difficulty difficulty) {
+    switch (difficulty) {
+      case Difficulty.beginner:
+        return 'Principiante';
+      case Difficulty.intermediate:
+        return 'Intermedio';
+      case Difficulty.advanced:
+        return 'Avanzado';
+      case Difficulty.expert:
+        return 'Experto';
+    }
   }
 }
 
@@ -1084,88 +1169,88 @@ class _SettingsScreenState extends State<SettingsScreen> {
           padding: const EdgeInsets.all(20),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            const Text(
-              'Calibración de Espaciado Horizontal',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Ajusta la distancia entre notas. 100% (derecha) es el valor actual por defecto y 75% (izquierda) es el mínimo.',
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 18),
-            Row(
-              children: [
-                const Text('75%'),
-                Expanded(
-                  child: Slider(
-                    min: _minNoteSpacingScale,
-                    max: _maxNoteSpacingScale,
-                    divisions: 25,
-                    value: _spacingScale,
-                    label: '${(_spacingScale * 100).round()}%',
-                    onChanged: (value) {
-                      setState(() {
-                        _spacingScale = value;
-                      });
-                      _noteSpacingScale.value = value;
-                    },
+            children: [
+              const Text(
+                'Calibración de Espaciado Horizontal',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Ajusta la distancia entre notas. 100% (derecha) es el valor actual por defecto y 75% (izquierda) es el mínimo.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  const Text('75%'),
+                  Expanded(
+                    child: Slider(
+                      min: _minNoteSpacingScale,
+                      max: _maxNoteSpacingScale,
+                      divisions: 25,
+                      value: _spacingScale,
+                      label: '${(_spacingScale * 100).round()}%',
+                      onChanged: (value) {
+                        setState(() {
+                          _spacingScale = value;
+                        });
+                        _noteSpacingScale.value = value;
+                      },
+                    ),
                   ),
-                ),
-                const Text('100%'),
-              ],
-            ),
-            Text(
-              'Valor actual: ${(_spacingScale * 100).round()}%',
-              style: const TextStyle(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 24),
-            const Divider(height: 1),
-            const SizedBox(height: 18),
-            const Text(
-              'Calibración del Inicio de la Música',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              'Mínimo (izquierda): posición actual. Máximo (derecha): mitad de pantalla.',
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                const Text('Actual'),
-                Expanded(
-                  child: Slider(
-                    min: _minMusicStartOffsetScale,
-                    max: _maxMusicStartOffsetScale,
-                    divisions: 20,
-                    value: _startOffsetScale,
-                    label: '${(_startOffsetScale * 100).round()}%',
-                    onChanged: (value) {
-                      setState(() {
-                        _startOffsetScale = value;
-                      });
-                      _musicStartOffsetScale.value = value;
-                    },
+                  const Text('100%'),
+                ],
+              ),
+              Text(
+                'Valor actual: ${(_spacingScale * 100).round()}%',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 24),
+              const Divider(height: 1),
+              const SizedBox(height: 18),
+              const Text(
+                'Calibración del Inicio de la Música',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              const Text(
+                'Mínimo (izquierda): posición actual. Máximo (derecha): mitad de pantalla.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  const Text('Actual'),
+                  Expanded(
+                    child: Slider(
+                      min: _minMusicStartOffsetScale,
+                      max: _maxMusicStartOffsetScale,
+                      divisions: 20,
+                      value: _startOffsetScale,
+                      label: '${(_startOffsetScale * 100).round()}%',
+                      onChanged: (value) {
+                        setState(() {
+                          _startOffsetScale = value;
+                        });
+                        _musicStartOffsetScale.value = value;
+                      },
+                    ),
                   ),
-                ),
-                const Text('Mitad'),
-              ],
-            ),
-            Text(
-              'Desplazamiento de inicio: ${(_startOffsetScale * 100).round()}%',
-              style: const TextStyle(fontWeight: FontWeight.w600),
-            ),
-            const SizedBox(height: 24),
-            ElevatedButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Volver'),
-            ),
-          ],
+                  const Text('Mitad'),
+                ],
+              ),
+              Text(
+                'Desplazamiento de inicio: ${(_startOffsetScale * 100).round()}%',
+                style: const TextStyle(fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Volver'),
+              ),
+            ],
           ),
         ),
       ),
@@ -1194,16 +1279,13 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
 
   Future<List<PreloadedMusicXmlFile>> _loadAvailableLevels() async {
     try {
-      // Primero intenta con el servicio de descubrimiento
       final discoveredFiles = await _preloadService.discover();
       if (discoveredFiles.isNotEmpty) {
         return discoveredFiles;
       }
 
-      // Si no encuentra archivos, intenta cargar desde assets
       return await _loadLevelsFromAssets();
     } catch (e) {
-      // En caso de error, intenta cargar desde assets
       return await _loadLevelsFromAssets();
     }
   }
@@ -1408,10 +1490,12 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
 /// Pantalla de resultados
 class ResultsScreen extends StatelessWidget {
   final String summary;
+  final Exercise? exercise;
 
   const ResultsScreen({
     Key? key,
     required this.summary,
+    this.exercise,
   }) : super(key: key);
 
   @override
@@ -1425,10 +1509,17 @@ class ResultsScreen extends StatelessWidget {
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             const Text(
-              '📊 Results Screen - Próximamente',
+              '📊 Resultados',
               style: TextStyle(fontSize: 24),
               textAlign: TextAlign.center,
             ),
+            const SizedBox(height: 24),
+            if (exercise != null) ...[
+              Text('Ejercicio: ${exercise!.title}'),
+              Text('Compositor: ${exercise!.composer}'),
+              const Divider(),
+            ],
+            Text(summary),
             const SizedBox(height: 24),
             ElevatedButton(
               onPressed: () => Navigator.popUntil(context, (route) => route.isFirst),
@@ -1438,5 +1529,526 @@ class ResultsScreen extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+// ============================================================
+// Pantalla de selección de ejercicios (añadir al final de screens.dart)
+// ============================================================
+
+/// Pantalla para seleccionar ejercicios precargados
+class ExerciseSelectionScreen extends StatefulWidget {
+  const ExerciseSelectionScreen({Key? key}) : super(key: key);
+
+  @override
+  State<ExerciseSelectionScreen> createState() =>
+      _ExerciseSelectionScreenState();
+}
+
+class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
+    with SingleTickerProviderStateMixin {
+  late TabController _tabController;
+  String _searchQuery = '';
+  Difficulty? _selectedDifficulty;
+  ExerciseType? _selectedType;
+  List<Exercise> _filteredExercises = [];
+
+  @override
+  void initState() {
+    super.initState();
+    _tabController = TabController(
+      length: 4,
+      vsync: this,
+    );
+    _tabController.addListener(_onTabChanged);
+    _updateFilteredExercises();
+  }
+
+  @override
+  void dispose() {
+    _tabController.dispose();
+    super.dispose();
+  }
+
+  void _onTabChanged() {
+    setState(() {
+      _selectedDifficulty = null;
+      _selectedType = null;
+      _searchQuery = '';
+      _updateFilteredExercises();
+    });
+  }
+
+  void _updateFilteredExercises() {
+    final provider = context.read<ExerciseProvider>();
+    var exercises = provider.exercises;
+
+    if (_searchQuery.isNotEmpty) {
+      exercises = provider.searchExercises(_searchQuery);
+    }
+
+    if (_selectedDifficulty != null) {
+      exercises = exercises
+          .where((e) => e.difficulty == _selectedDifficulty)
+          .toList();
+    }
+
+    if (_selectedType != null) {
+      exercises = exercises.where((e) => e.type == _selectedType).toList();
+    }
+
+    setState(() {
+      _filteredExercises = exercises;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = context.watch<ExerciseProvider>();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('🎯 Elegir Ejercicio'),
+        bottom: TabBar(
+          controller: _tabController,
+          tabs: const [
+            Tab(text: '📚 Todos'),
+            Tab(text: '🌱 Principiante'),
+            Tab(text: '⚡ Intermedio'),
+            Tab(text: '🔥 Avanzado'),
+          ],
+        ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.search),
+            onPressed: () => _showSearchDialog(context),
+          ),
+          IconButton(
+            icon: const Icon(Icons.filter_list),
+            onPressed: () => _showFilterDialog(context),
+          ),
+        ],
+      ),
+      body: provider.isLoading
+          ? const Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text('Cargando ejercicios...'),
+                ],
+              ),
+            )
+          : provider.error != null
+              ? Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.error_outline,
+                          size: 48, color: Colors.red),
+                      const SizedBox(height: 16),
+                      Text(provider.error!),
+                      const SizedBox(height: 16),
+                      ElevatedButton(
+                        onPressed: () => provider.loadExercises(),
+                        child: const Text('Reintentar'),
+                      ),
+                    ],
+                  ),
+                )
+              : _filteredExercises.isEmpty
+                  ? Center(
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          const Icon(Icons.search_off,
+                              size: 48, color: Colors.grey),
+                          const SizedBox(height: 16),
+                          Text(
+                            _searchQuery.isNotEmpty
+                                ? 'No se encontraron ejercicios'
+                                : 'No hay ejercicios disponibles',
+                            style: const TextStyle(fontSize: 18),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            _searchQuery.isNotEmpty
+                                ? 'Intenta con otra búsqueda'
+                                : 'Carga algunos ejercicios en la carpeta assets/exercises',
+                            style: TextStyle(color: Colors.grey[500]),
+                          ),
+                        ],
+                      ),
+                    )
+                  : _buildExerciseList(context),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () {
+          _showStatsDialog(context, provider.getStats());
+        },
+        icon: const Icon(Icons.insights),
+        label: const Text('Estadísticas'),
+      ),
+    );
+  }
+
+  // ------------------------------------------------------------
+  // Métodos auxiliares (copia los que ya tenías)
+  // ------------------------------------------------------------
+  Widget _buildExerciseList(BuildContext context) {
+    return ListView.builder(
+      padding: const EdgeInsets.all(8),
+      itemCount: _filteredExercises.length,
+      itemBuilder: (context, index) {
+        final exercise = _filteredExercises[index];
+        return _buildExerciseCard(context, exercise);
+      },
+    );
+  }
+
+  Widget _buildExerciseCard(BuildContext context, Exercise exercise) {
+    final colorScheme = Theme.of(context).colorScheme;
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      elevation: 2,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () {
+          context.read<ExerciseProvider>().selectExercise(exercise);
+          _loadExerciseAndNavigate(context, exercise);
+        },
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  color: exercise.difficultyColor.withOpacity(0.2),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(
+                  exercise.icon,
+                  color: exercise.difficultyColor,
+                  size: 28,
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            exercise.title,
+                            style: const TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                        if (exercise.isFavorite)
+                          const Icon(Icons.favorite,
+                              color: Colors.red, size: 16),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      exercise.description,
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: Colors.grey[600],
+                      ),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        _buildChip(
+                          context,
+                          _getDifficultyLabel(exercise.difficulty),
+                          exercise.difficultyColor,
+                        ),
+                        _buildChip(
+                          context,
+                          _getTypeLabel(exercise.type),
+                          colorScheme.primary,
+                        ),
+                        _buildChip(
+                          context,
+                          '${exercise.bpm} BPM',
+                          Colors.blue,
+                        ),
+                        _buildChip(
+                          context,
+                          exercise.estimatedDurationString,
+                          Colors.orange,
+                        ),
+                        if (exercise.timesCompleted > 0)
+                          _buildChip(
+                            context,
+                            '✅ ${exercise.timesCompleted}x',
+                            Colors.green,
+                          ),
+                        if (exercise.bestScore > 0)
+                          _buildChip(
+                            context,
+                            '🏆 ${exercise.bestScore.toStringAsFixed(0)}',
+                            Colors.amber,
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.arrow_forward_ios, size: 16),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildChip(BuildContext context, String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.2),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.3)),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11,
+          color: color,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+  }
+
+  String _getDifficultyLabel(Difficulty difficulty) {
+    switch (difficulty) {
+      case Difficulty.beginner:
+        return '🌱 Principiante';
+      case Difficulty.intermediate:
+        return '⚡ Intermedio';
+      case Difficulty.advanced:
+        return '🔥 Avanzado';
+      case Difficulty.expert:
+        return '💪 Experto';
+    }
+  }
+
+  String _getTypeLabel(ExerciseType type) {
+    switch (type) {
+      case ExerciseType.rhythmTraining:
+        return '🎵 Ritmo';
+      case ExerciseType.pitchRecognition:
+        return '🎯 Alturas';
+      case ExerciseType.sightReading:
+        return '👁️ Lectura';
+      case ExerciseType.earTraining:
+        return '👂 Oído';
+    }
+  }
+
+  void _showSearchDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('🔍 Buscar Ejercicios'),
+        content: TextField(
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: 'Título, compositor o tags',
+            prefixIcon: Icon(Icons.search),
+          ),
+          onChanged: (value) {
+            setState(() {
+              _searchQuery = value;
+              _updateFilteredExercises();
+            });
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cerrar'),
+          ),
+          TextButton(
+            onPressed: () {
+              setState(() {
+                _searchQuery = '';
+                _updateFilteredExercises();
+              });
+              Navigator.pop(context);
+            },
+            child: const Text('Limpiar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showFilterDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('🎯 Filtrar Ejercicios'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Dificultad:', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: Difficulty.values.map((difficulty) {
+                return FilterChip(
+                  label: Text(_getDifficultyLabel(difficulty)),
+                  selected: _selectedDifficulty == difficulty,
+                  onSelected: (selected) {
+                    setState(() {
+                      _selectedDifficulty = selected ? difficulty : null;
+                      _updateFilteredExercises();
+                    });
+                  },
+                );
+              }).toList(),
+            ),
+            const SizedBox(height: 16),
+            const Text('Tipo:', style: TextStyle(fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              children: ExerciseType.values.map((type) {
+                return FilterChip(
+                  label: Text(_getTypeLabel(type)),
+                  selected: _selectedType == type,
+                  onSelected: (selected) {
+                    setState(() {
+                      _selectedType = selected ? type : null;
+                      _updateFilteredExercises();
+                    });
+                  },
+                );
+              }).toList(),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              setState(() {
+                _selectedDifficulty = null;
+                _selectedType = null;
+                _updateFilteredExercises();
+              });
+              Navigator.pop(context);
+            },
+            child: const Text('Limpiar filtros'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Aplicar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showStatsDialog(BuildContext context, ExerciseStats stats) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('📊 Estadísticas'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _buildStatRow('Total ejercicios', '${stats.totalExercises}'),
+            _buildStatRow('Completados', '${stats.completedExercises}'),
+            _buildStatRow('Favoritos', '${stats.favoriteCount}'),
+            _buildStatRow('Tasa de progreso',
+                '${stats.completionRate.toStringAsFixed(1)}%'),
+            _buildStatRow('Puntuación promedio',
+                '${stats.averageBestScore.toStringAsFixed(0)} pts'),
+            _buildStatRow('Tiempo total',
+                _formatDuration(stats.totalTimeSpent)),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Cerrar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          Text(label, style: const TextStyle(fontSize: 14)),
+          Text(value,
+              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+        ],
+      ),
+    );
+  }
+
+  String _formatDuration(Duration duration) {
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes % 60;
+    final seconds = duration.inSeconds % 60;
+
+    if (hours > 0) {
+      return '${hours}h ${minutes}m ${seconds}s';
+    } else if (minutes > 0) {
+      return '${minutes}m ${seconds}s';
+    } else {
+      return '${seconds}s';
+    }
+  }
+
+  Future<void> _loadExerciseAndNavigate(BuildContext context, Exercise exercise) async {
+    try {
+      final content = await rootBundle.loadString(exercise.assetPath);
+      if (!context.mounted) return;
+
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => GameScreen(
+            preloadedContent: content,
+            fileName: exercise.fileName,
+            exercise: exercise,
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('❌ Error cargando ejercicio: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
   }
 }

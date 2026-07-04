@@ -1,9 +1,17 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import 'screens/screens.dart';
+import 'providers/exercise_provider.dart'; // <-- Importa el provider
+import 'core/core.dart'; // <-- Necesario para ExerciseStats
 
 void main() {
-  runApp(const MusicTrainingApp());
+  runApp(
+    ChangeNotifierProvider(
+      create: (_) => ExerciseProvider()..loadExercises(),
+      child: const MusicTrainingApp(),
+    ),
+  );
 }
 
 class MusicTrainingApp extends StatelessWidget {
@@ -36,11 +44,33 @@ class HomeScreen extends StatefulWidget {
 class _HomeScreenState extends State<HomeScreen> {
   @override
   Widget build(BuildContext context) {
+    final exerciseProvider = context.watch<ExerciseProvider>();
+    final exercises = exerciseProvider.exercises;
+
     return Scaffold(
       appBar: AppBar(
         title: const Text('🎵 Entrenador Musical Pro'),
         centerTitle: true,
         elevation: 0,
+        actions: [
+          if (exercises.isNotEmpty)
+            Container(
+              margin: const EdgeInsets.only(right: 16),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.amber.shade700,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                '${exercises.length} ejercicios',
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.black87,
+                ),
+              ),
+            ),
+        ],
       ),
       body: Center(
         child: SingleChildScrollView(
@@ -49,7 +79,6 @@ class _HomeScreenState extends State<HomeScreen> {
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // Logo/Icono
                 Container(
                   padding: const EdgeInsets.all(32),
                   decoration: BoxDecoration(
@@ -65,19 +94,15 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                 ),
                 const SizedBox(height: 32),
-
-                // Título
                 Text(
                   'Bienvenido al Entrenador Musical',
                   style: Theme.of(context).textTheme.headlineMedium,
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 16),
-
-                // Descripción
                 Text(
-                  'Sistema avanzado de entrenamiento musical con soporte para MusicXML, '
-                  'metrónomo automático y análisis de precisión rítmica.',
+                  'Sistema avanzado de entrenamiento musical con ejercicios '
+                  'precargados, metrónomo automático y análisis de precisión rítmica.',
                   style: Theme.of(context).textTheme.bodyLarge?.copyWith(
                         color: Colors.grey[400],
                       ),
@@ -85,41 +110,35 @@ class _HomeScreenState extends State<HomeScreen> {
                 ),
                 const SizedBox(height: 48),
 
-                // Botones principales
                 _buildMenuButton(
                   context,
-                  icon: Icons.play_arrow,
-                  title: 'Iniciar Juego',
-                  description: 'Comienza un nuevo ejercicio',
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(builder: (_) => const GameScreen()),
-                    );
-                  },
-                ),
-                const SizedBox(height: 16),
-
-                _buildMenuButton(
-                  context,
-                  icon: Icons.folder_open,
-                  title: 'Elegir nivel',
-                  description: 'Importa un archivo de notación musical',
-                  onPressed: () {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => const GameScreen(),
-                      ),
-                    );
-                  },
+                  icon: Icons.music_note,
+                  title: '🎯 Elegir Ejercicios',
+                  description: exerciseProvider.isLoading
+                      ? 'Cargando ejercicios...'
+                      : exerciseProvider.error != null
+                          ? '⚠️ ${exerciseProvider.error}'
+                          : exercises.isEmpty
+                              ? '📂 No hay ejercicios disponibles'
+                              : '📚 ${exercises.length} ejercicios listos para practicar',
+                  onPressed: exerciseProvider.isLoading
+                      ? null
+                      : () {
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => ExerciseSelectionScreen(), // <-- SIN const
+                            ),
+                          );
+                        },
+                  isPrimary: true,
                 ),
                 const SizedBox(height: 16),
 
                 _buildMenuButton(
                   context,
                   icon: Icons.settings,
-                  title: 'Configuración',
+                  title: '⚙️ Configuración',
                   description: 'Ajusta tempo, volumen y preferencias',
                   onPressed: () {
                     Navigator.push(
@@ -133,12 +152,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 _buildMenuButton(
                   context,
                   icon: Icons.info,
-                  title: 'Acerca de',
+                  title: 'ℹ️ Acerca de',
                   description: 'Información y arquitectura del sistema',
                   onPressed: () {
                     _showAboutDialog(context);
                   },
                 ),
+
+                if (exercises.isNotEmpty) ...[
+                  const SizedBox(height: 32),
+                  _buildStatsWidget(context, exerciseProvider.getStats()),
+                ],
               ],
             ),
           ),
@@ -152,7 +176,8 @@ class _HomeScreenState extends State<HomeScreen> {
     required IconData icon,
     required String title,
     required String description,
-    required VoidCallback onPressed,
+    VoidCallback? onPressed,
+    bool isPrimary = false,
   }) {
     return Material(
       color: Colors.transparent,
@@ -163,17 +188,24 @@ class _HomeScreenState extends State<HomeScreen> {
           padding: const EdgeInsets.all(20),
           decoration: BoxDecoration(
             border: Border.all(
-              color: Theme.of(context).colorScheme.outline,
-              width: 1,
+              color: isPrimary
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.outline,
+              width: isPrimary ? 2 : 1,
             ),
             borderRadius: BorderRadius.circular(12),
+            color: isPrimary
+                ? Theme.of(context).colorScheme.primary.withOpacity(0.1)
+                : Colors.transparent,
           ),
           child: Row(
             children: [
               Icon(
                 icon,
                 size: 36,
-                color: Theme.of(context).colorScheme.primary,
+                color: isPrimary
+                    ? Theme.of(context).colorScheme.primary
+                    : Theme.of(context).colorScheme.onSurface,
               ),
               const SizedBox(width: 20),
               Expanded(
@@ -182,7 +214,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   children: [
                     Text(
                       title,
-                      style: Theme.of(context).textTheme.titleLarge,
+                      style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                            color: isPrimary
+                                ? Theme.of(context).colorScheme.primary
+                                : null,
+                          ),
                     ),
                     const SizedBox(height: 4),
                     Text(
@@ -197,12 +233,73 @@ class _HomeScreenState extends State<HomeScreen> {
               Icon(
                 Icons.arrow_forward_ios,
                 size: 20,
-                color: Colors.grey[600],
+                color: isPrimary
+                    ? Theme.of(context).colorScheme.primary
+                    : Colors.grey[600],
               ),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildStatsWidget(BuildContext context, ExerciseStats stats) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceVariant,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceAround,
+        children: [
+          _buildStatItem(
+            context,
+            '${stats.completedExercises}/${stats.totalExercises}',
+            'Completados',
+            Icons.check_circle,
+          ),
+          _buildStatItem(
+            context,
+            '${stats.favoriteCount}',
+            'Favoritos',
+            Icons.favorite,
+          ),
+          _buildStatItem(
+            context,
+            '${stats.completionRate.toStringAsFixed(0)}%',
+            'Progreso',
+            Icons.trending_up,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatItem(
+    BuildContext context,
+    String value,
+    String label,
+    IconData icon,
+  ) {
+    return Column(
+      children: [
+        Icon(icon, color: Theme.of(context).colorScheme.primary, size: 24),
+        const SizedBox(height: 4),
+        Text(
+          value,
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
+        ),
+        Text(
+          label,
+          style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: Colors.grey[500],
+              ),
+        ),
+      ],
     );
   }
 

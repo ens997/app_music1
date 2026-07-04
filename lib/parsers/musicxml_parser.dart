@@ -92,8 +92,6 @@ class MusicXMLParser {
           String pitchName = 'C';
           int octave = 4;
           Accidental accidental = Accidental.natural;
-          bool displayAccidental = false;
-          int dotCount = 0;
 
           if (!isRest) {
             final pitch = note.getElement('pitch');
@@ -115,55 +113,34 @@ class MusicXMLParser {
                 }
               }
             }
-
-            final accidentalText = note.getElement('accidental')?.text.trim().toLowerCase();
-            if (accidentalText != null && accidentalText.isNotEmpty) {
-              displayAccidental = true;
-              switch (accidentalText) {
-                case 'sharp':
-                  accidental = Accidental.sharp;
-                  break;
-                case 'flat':
-                  accidental = Accidental.flat;
-                  break;
-                case 'double-sharp':
-                case 'sharp-sharp':
-                  accidental = Accidental.doubleSharp;
-                  break;
-                case 'double-flat':
-                  accidental = Accidental.doubleFlat;
-                  break;
-                case 'natural':
-                default:
-                  accidental = Accidental.natural;
-                  break;
-              }
-            }
           }
 
           // Duración en divisions
           final durationText = note.getElement('duration')?.text;
           final durationDivisions = int.tryParse(durationText ?? '') ?? 0;
-          dotCount = note.findElements('dot').length;
 
           final typeText = note.getElement('type')?.text.trim().toLowerCase();
           final durationEnum = _durationFromType(typeText, durationDivisions, divisions);
 
-          // Leer informaci?n de barras (beams) por nivel.
+          // Leer información de barras (beams)
           BeamType beamType = BeamType.none;
-          final beamLevels = <int, BeamType>{};
           final beamElements = note.findElements('beam');
           if (beamElements.isNotEmpty) {
-            for (final beamElement in beamElements) {
-              final beamNumber =
-                  int.tryParse(beamElement.getAttribute('number') ?? '1') ?? 1;
-              final parsedBeamType =
-                  _beamTypeFromText(beamElement.text.trim().toLowerCase());
-              if (parsedBeamType != BeamType.none) {
-                beamLevels[beamNumber] = parsedBeamType;
-              }
+            // Tomar el primer beam (puede haber múltiples para semicorcheas)
+            final beamText = beamElements.first.text.trim().toLowerCase();
+            switch (beamText) {
+              case 'begin':
+                beamType = BeamType.begin;
+                break;
+              case 'continue':
+                beamType = BeamType.continuation;
+                break;
+              case 'end':
+                beamType = BeamType.end;
+                break;
+              default:
+                beamType = BeamType.none;
             }
-            beamType = beamLevels[1] ?? BeamType.none;
           }
 
           // Calcular ticks en TPQN=480
@@ -176,15 +153,11 @@ class MusicXMLParser {
           final noteModel = NoteModel(
             pitch: pitchFull,
             duration: durationEnum,
-            durationTicksOverride: durationTicks,
-            isDotted: dotCount > 0,
             absoluteTick: absoluteTick,
             accidental: accidental,
-            displayAccidental: displayAccidental,
             isRest: isRest,
             velocity: 64,
             beamType: beamType,
-            beamLevels: beamLevels,
           );
 
           notes.add(noteModel);
@@ -213,19 +186,6 @@ class MusicXMLParser {
     final file = File(filePath);
     final xmlContent = await file.readAsString();
     return parse(xmlContent);
-  }
-
-  static BeamType _beamTypeFromText(String beamText) {
-    switch (beamText) {
-      case 'begin':
-        return BeamType.begin;
-      case 'continue':
-        return BeamType.continuation;
-      case 'end':
-        return BeamType.end;
-      default:
-        return BeamType.none;
-    }
   }
 
   static NoteDuration _durationFromType(
