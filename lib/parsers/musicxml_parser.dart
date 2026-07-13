@@ -265,3 +265,6 @@ class MeasureHandler {
   // TODO: Procesar notas dentro del compás
   // TODO: Calcular timing absoluto
 }
+MusicScore parseMusicXmlInBackground(String xmlContent) {
+  return MusicXMLParser.parse(xmlContent);
+}

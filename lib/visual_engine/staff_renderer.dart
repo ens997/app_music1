@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-
 import '../core/core.dart';
 import 'bravura_glyphs.dart';
 
@@ -15,34 +14,54 @@ class StaffRenderer {
   static const double KEY_SIGNATURE_TIME_GAP = 10.0;
   static const double CLEF_TO_KEY_SIGNATURE_GAP = 8.0;
 
+  // --- PINCELES ESTÁTICOS ---
+  static final Paint _staffPaint = Paint()
+    ..color = Colors.black87
+    ..strokeWidth = STAFF_LINE_WIDTH
+    ..style = PaintingStyle.stroke;
+
+  static final Paint _barLinePaint = Paint()
+    ..color = Colors.black87
+    ..strokeWidth = 2.0
+    ..style = PaintingStyle.stroke;
+
+  static final Paint _finalBarLinePaint = Paint()
+    ..color = Colors.black87
+    ..strokeWidth = 4.0
+    ..style = PaintingStyle.stroke;
+
+  static final Paint _ledgerPaint = Paint()
+    ..color = Colors.black87
+    ..strokeWidth = STAFF_LINE_WIDTH
+    ..style = PaintingStyle.stroke;
+
+  // --- TextPainter reutilizable para compás ---
+  static final TextPainter _timeSigPainter = TextPainter(
+    textDirection: TextDirection.ltr,
+  );
+
   static void drawStaff(
     Canvas canvas,
     Rect bounds, {
     bool drawAdditionalLines = true,
   }) {
-    final paint = Paint()
-      ..color = Colors.black87
-      ..strokeWidth = STAFF_LINE_WIDTH
-      ..style = PaintingStyle.stroke;
-
     final top = bounds.top;
     final left = bounds.left;
     final right = bounds.right;
 
     for (int i = 0; i < LINE_COUNT; i++) {
       final y = top + (i * SPACE_HEIGHT);
-      canvas.drawLine(Offset(left, y), Offset(right, y), paint);
+      canvas.drawLine(Offset(left, y), Offset(right, y), _staffPaint);
     }
 
     if (drawAdditionalLines) {
       for (int i = 1; i <= 2; i++) {
         final y = top - (i * SPACE_HEIGHT);
-        canvas.drawLine(Offset(left, y), Offset(right, y), paint);
+        canvas.drawLine(Offset(left, y), Offset(right, y), _staffPaint);
       }
-
       for (int i = 1; i <= 2; i++) {
         final y = top + (LINE_COUNT - 1) * SPACE_HEIGHT + (i * SPACE_HEIGHT);
-        canvas.drawLine(Offset(left, y), Offset(right, y), paint);
+        canvas.drawLine(Offset(left, y), Offset(right, y), _staffPaint);
       }
     }
   }
@@ -69,40 +88,35 @@ class StaffRenderer {
     bool isDouble = false,
     bool isFinal = false,
   }) {
-    final paint = Paint()
-      ..color = Colors.black87
-      ..strokeWidth = 2.0
-      ..style = PaintingStyle.stroke;
-
     if (isFinal) {
       canvas.drawLine(
         Offset(position.dx, position.dy),
         Offset(position.dx, position.dy + height),
-        paint,
+        _finalBarLinePaint,
       );
-      paint.strokeWidth = 4.0;
+      _barLinePaint.strokeWidth = 2.0;
       canvas.drawLine(
         Offset(position.dx + 3, position.dy),
         Offset(position.dx + 3, position.dy + height),
-        paint,
+        _barLinePaint,
       );
     } else if (isDouble) {
       canvas.drawLine(
         Offset(position.dx, position.dy),
         Offset(position.dx, position.dy + height),
-        paint,
+        _barLinePaint,
       );
-      paint.strokeWidth = 1.0;
+      _barLinePaint.strokeWidth = 1.0;
       canvas.drawLine(
         Offset(position.dx + 3, position.dy),
         Offset(position.dx + 3, position.dy + height),
-        paint,
+        _barLinePaint,
       );
     } else {
       canvas.drawLine(
         Offset(position.dx, position.dy),
         Offset(position.dx, position.dy + height),
-        paint,
+        _barLinePaint,
       );
     }
   }
@@ -114,43 +128,39 @@ class StaffRenderer {
   ) {
     final centerY = position.dy;
 
-    final numeratorPainter = TextPainter(
-      text: TextSpan(
-        text: timeSignature.numerator.toString(),
-        style: const TextStyle(
-          fontSize: 32,
-          fontWeight: FontWeight.bold,
-          color: Colors.black87,
-        ),
+    // Numerador
+    _timeSigPainter.text = TextSpan(
+      text: timeSignature.numerator.toString(),
+      style: const TextStyle(
+        fontSize: 32,
+        fontWeight: FontWeight.bold,
+        color: Colors.black87,
       ),
-      textDirection: TextDirection.ltr,
     );
-    numeratorPainter.layout();
-    numeratorPainter.paint(
+    _timeSigPainter.layout();
+    _timeSigPainter.paint(
       canvas,
       Offset(
-        position.dx - numeratorPainter.width / 2,
-        centerY - numeratorPainter.height / 2 - 2,
+        position.dx - _timeSigPainter.width / 2,
+        centerY - _timeSigPainter.height / 2 - 2,
       ),
     );
 
-    final denominatorPainter = TextPainter(
-      text: TextSpan(
-        text: timeSignature.denominator.toString(),
-        style: const TextStyle(
-          fontSize: 32,
-          fontWeight: FontWeight.bold,
-          color: Colors.black87,
-        ),
+    // Denominador
+    _timeSigPainter.text = TextSpan(
+      text: timeSignature.denominator.toString(),
+      style: const TextStyle(
+        fontSize: 32,
+        fontWeight: FontWeight.bold,
+        color: Colors.black87,
       ),
-      textDirection: TextDirection.ltr,
     );
-    denominatorPainter.layout();
-    denominatorPainter.paint(
+    _timeSigPainter.layout();
+    _timeSigPainter.paint(
       canvas,
       Offset(
-        position.dx - denominatorPainter.width / 2,
-        centerY + denominatorPainter.height / 2 - 2,
+        position.dx - _timeSigPainter.width / 2,
+        centerY + _timeSigPainter.height / 2 - 2,
       ),
     );
   }
@@ -287,16 +297,10 @@ class StaffRenderer {
     Offset position,
     double width,
   ) {
-    final paint = Paint()
-      ..color = Colors.black87
-      ..strokeWidth = STAFF_LINE_WIDTH
-      ..style = PaintingStyle.stroke;
-
     final left = position.dx - width / 2;
     final right = position.dx + width / 2;
     final y = position.dy;
-
-    canvas.drawLine(Offset(left, y), Offset(right, y), paint);
+    canvas.drawLine(Offset(left, y), Offset(right, y), _ledgerPaint);
   }
 
   static String getDebugInfo() {

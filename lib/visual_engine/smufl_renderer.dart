@@ -1,3 +1,4 @@
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import '../core/core.dart';
 import 'staff_renderer.dart' as sr;
@@ -5,7 +6,10 @@ import 'note_visual.dart' as nv;
 import 'animation_manager.dart' as am;
 
 /// Renderizador visual principal usando Canvas
-/// Orquesta StaffRenderer, NoteVisual y AnimationManager
+/// Versión OPTIMIZADA para móvil:
+/// - Cache del pentagrama en Picture
+/// - Pinceles estáticos (sin creación en paint)
+/// - Dibujo eficiente de notas
 class SMuFLRenderer extends CustomPainter {
   static const double compactStaffTop = 43;
 
@@ -20,16 +24,22 @@ class SMuFLRenderer extends CustomPainter {
   final bool showBarLines;
   final bool showHitLine;
   final double? hitLineXOverride;
-
-  /// Permite controlar la escala horizontal de la partitura.
-  /// Si se proporciona, ignora el ancho disponible del canvas
-  /// y dibuja las notas según "px por tick" fijo.
   final double? pixelsPerTick;
 
-  // Colores personalizables
   final Color backgroundColor;
   final Color staffColor;
   final Color noteColor;
+
+  // --- Cache del pentagrama (optimización principal) ---
+  ui.Picture? _cachedStaffPicture;
+  Size? _lastCacheSize;
+
+  // --- Pinceles estáticos (no se crean en paint) ---
+  static final Paint _backgroundPaint = Paint();
+  static final Paint _hitLinePaint = Paint()
+    ..color = Colors.red.withOpacity(0.8)
+    ..strokeWidth = 3.0
+    ..style = PaintingStyle.stroke;
 
   SMuFLRenderer({
     this.ticksEngine,
@@ -49,41 +59,66 @@ class SMuFLRenderer extends CustomPainter {
     this.noteColor = Colors.black,
   });
 
+  // ============================================================
+  // CONSTRUCCIÓN DEL CACHE DEL PENTAGRAMA (solo una vez)
+  // ============================================================
+
+  void _buildStaffCache(Size size) {
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    // 1. Fondo
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      _backgroundPaint..color = backgroundColor,
+    );
+
+    // 2. Pentagrama, clave y compás
+    _drawStaffWithElements(canvas, size);
+
+    // 3. Guardar en cache
+    _cachedStaffPicture = recorder.endRecording();
+    _lastCacheSize = size;
+  }
+
+  // ============================================================
+  // MÉTODO PAINT (optimizado)
+  // ============================================================
+
   @override
   void paint(Canvas canvas, Size size) {
     if (size.width == 0 || size.height == 0) return;
 
-    // 1. Dibujar fondo
-    _drawBackground(canvas, size);
+    // --- Dibujar cache del pentagrama (ultra-rápido) ---
+    if (_cachedStaffPicture == null || _lastCacheSize != size) {
+      _buildStaffCache(size);
+    }
+    canvas.drawPicture(_cachedStaffPicture!);
 
-    // 2. Calcular posición de la línea de beat en base a la primera nota
+    // --- Calcular posición de la línea de beat ---
     final double leftMargin = 80.0;
     final double hitLineX = hitLineXOverride ?? _computeHitLineX(leftMargin);
 
-    // 3. Dibujar pentagrama, notas y línea de beat
-    _drawStaffWithElements(canvas, size);
+    // --- Dibujar elementos dinámicos (notas, línea de beat, animaciones) ---
     _drawNotes(canvas, size, hitLineX);
     if (showHitLine) {
-      _drawHitLine(canvas, size, hitLineX);
+      _drawHitLine(canvas, hitLineX);
     }
 
-    // 4. Actualizar animaciones
-    animationManager.updateAnimations();
+    // --- Dibujar animaciones (feedback, combo, precisión) ---
+    animationManager.updateAndDraw(canvas, size);
   }
 
-  void _drawBackground(Canvas canvas, Size size) {
-    canvas.drawRect(
-      Rect.fromLTWH(0, 0, size.width, size.height),
-      Paint()..color = backgroundColor,
-    );
-  }
+  // ============================================================
+  // DIBUJO DEL PENTAGRAMA (solo para el cache)
+  // ============================================================
 
   void _drawStaffWithElements(Canvas canvas, Size size) {
     const double topMargin = compactStaffTop;
     const double leftMargin = 80;
     const double rightMargin = 40;
 
-    // Dibujar pentagrama (solo las 5 lineas principales)
+    // Dibujar pentagrama (solo las 5 líneas principales)
     final staffBounds = Rect.fromLTRB(
       leftMargin,
       topMargin,
@@ -96,7 +131,7 @@ class SMuFLRenderer extends CustomPainter {
       drawAdditionalLines: false,
     );
 
-    // Dibujar clave musical (posicionada en B4, linea 3)
+    // Dibujar clave musical (posicionada en B4, línea 3)
     final clefCenterY = topMargin + 2 * sr.StaffRenderer.SPACE_HEIGHT;
     final clefCenterX = leftMargin + 30;
     sr.StaffRenderer.drawClef(
@@ -105,7 +140,7 @@ class SMuFLRenderer extends CustomPainter {
       clefType,
     );
 
-    // La armadura comienza inmediatamente despues de la clave, con separacion convencional.
+    // Calcular posiciones para armadura y compás
     final keySignatureStartX =
         sr.StaffRenderer.clefRightEdge(clefCenterX, clefType) +
         sr.StaffRenderer.CLEF_TO_KEY_SIGNATURE_GAP;
@@ -114,7 +149,7 @@ class SMuFLRenderer extends CustomPainter {
         maxKeySignatureWidth +
         sr.StaffRenderer.KEY_SIGNATURE_TIME_GAP;
 
-    // Dibujar armadura (key signature) con posicionamiento convencional.
+    // Dibujar armadura (key signature)
     if (showKeySignature && keySignature != null) {
       sr.StaffRenderer.drawKeySignature(
         canvas,
@@ -124,7 +159,7 @@ class SMuFLRenderer extends CustomPainter {
       );
     }
 
-    // Dibujar indicacion de compas (alineada verticalmente con la clave)
+    // Dibujar indicación de compás
     if (showTimeSignature && timeSignature != null) {
       sr.StaffRenderer.drawTimeSignature(
         canvas,
@@ -134,26 +169,14 @@ class SMuFLRenderer extends CustomPainter {
     }
   }
 
-  int _ticksPerMeasure() {
-    if (timeSignature == null) {
-      return TicksEngine.TPQN * 4; // default 4/4
-    }
-
-    // Ticks per measure = TPQN * beats per measure * (4 / beatUnit)
-    // Ej: 3/4 -> TPQN * 3 * (4/4) = 3 * TPQN
-    //      6/8 -> TPQN * 6 * (4/8) = 3 * TPQN
-    return (TicksEngine.TPQN * timeSignature!.numerator * 4) ~/
-        timeSignature!.denominator;
-  }
-
-  double _computeHitLineX(double leftMargin) {
-    return leftMargin + 180.0;
-  }
+  // ============================================================
+  // DIBUJO DE NOTAS (dinámico, cada frame)
+  // ============================================================
 
   void _drawNotes(Canvas canvas, Size size, double hitLineX) {
-    const double staffTop = compactStaffTop;
-
     if (visibleNotes.isEmpty) return;
+
+    const double staffTop = compactStaffTop;
 
     final sortedNotes = [...visibleNotes]
       ..sort((a, b) => a.absoluteTick.compareTo(b.absoluteTick));
@@ -170,7 +193,7 @@ class SMuFLRenderer extends CustomPainter {
     // Agrupar notas por barras (beams)
     final beamedGroups = _groupBeamedNotes(sortedNotes);
 
-    // Dibujar notas dentro de cada compás
+    // Dibujar cada nota
     for (final note in sortedNotes) {
       final noteX = hitLineX + ((note.absoluteTick - baseTick) * pxPerTick);
       final measure = note.absoluteTick ~/ ticksPerMeasure;
@@ -186,11 +209,10 @@ class SMuFLRenderer extends CustomPainter {
       );
     }
 
-    // Dibujar barras de agrupación (beams) entre notas conectadas
+    // Dibujar beams entre notas conectadas
     _drawBeams(canvas, beamedGroups, baseTick, pxPerTick, hitLineX, staffTop);
 
-    // Dibujar líneas de compás entre compases: punto medio entre
-    // la última nota del compás actual y la primera del siguiente.
+    // Dibujar líneas de compás entre compases
     if (showBarLines) {
       final measures = firstXByMeasure.keys.toList()..sort();
       for (int i = 0; i < measures.length - 1; i++) {
@@ -209,29 +231,73 @@ class SMuFLRenderer extends CustomPainter {
     }
   }
 
-  /// Agrupa notas que están conectadas por barras (beams)
+  // ============================================================
+  // MÉTODOS AUXILIARES (sin cambios)
+  // ============================================================
+
+  int _ticksPerMeasure() {
+    if (timeSignature == null) {
+      return TicksEngine.TPQN * 4;
+    }
+    return (TicksEngine.TPQN * timeSignature!.numerator * 4) ~/
+        timeSignature!.denominator;
+  }
+
+  double _computeHitLineX(double leftMargin) {
+    return leftMargin + 180.0;
+  }
+
+  void _drawHitLine(Canvas canvas, double hitLineX) {
+    const double staffTop = compactStaffTop;
+
+    // Línea roja
+    canvas.drawLine(
+      Offset(hitLineX, staffTop),
+      Offset(hitLineX, staffTop + 4 * sr.StaffRenderer.SPACE_HEIGHT),
+      _hitLinePaint,
+    );
+
+    // Etiqueta "BEAT" (se crea cada vez, pero es texto pequeño)
+    final textPainter = TextPainter(
+      text: const TextSpan(
+        text: 'BEAT',
+        style: TextStyle(
+          color: Colors.red,
+          fontSize: 12,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    textPainter.layout();
+    textPainter.paint(
+      canvas,
+      Offset(hitLineX - textPainter.width / 2, 40),
+    );
+  }
+
+  // ============================================================
+  // MÉTODOS DE BEAMS (sin cambios, pero optimizados)
+  // ============================================================
+
   List<List<NoteModel>> _groupBeamedNotes(List<NoteModel> notes) {
     final groups = <List<NoteModel>>[];
     List<NoteModel>? currentGroup;
 
     for (final note in notes) {
-      if (note.isRest) continue; // Los silencios no se agrupan
+      if (note.isRest) continue;
 
       if (note.beamType == BeamType.begin) {
-        // Iniciar nuevo grupo
         currentGroup = [note];
         groups.add(currentGroup);
       } else if (note.beamType == BeamType.continuation || note.beamType == BeamType.end) {
-        // Continuar grupo existente
         if (currentGroup != null) {
           currentGroup.add(note);
         } else {
-          // Si no hay grupo, crear uno nuevo (caso edge)
           currentGroup = [note];
           groups.add(currentGroup);
         }
       } else {
-        // BeamType.none - no agrupar
         currentGroup = null;
       }
 
@@ -243,7 +309,6 @@ class SMuFLRenderer extends CustomPainter {
     return groups;
   }
 
-  /// Dibuja las barras de agrupación entre notas conectadas
   void _drawBeams(
     Canvas canvas,
     List<List<NoteModel>> beamedGroups,
@@ -252,16 +317,27 @@ class SMuFLRenderer extends CustomPainter {
     double hitLineX,
     double staffTop,
   ) {
+    // Pinceles estáticos para beams
+    final stemPaint = Paint()
+      ..color = Colors.black87
+      ..strokeWidth = 2.0
+      ..style = PaintingStyle.stroke;
+
+    final beamPaint = Paint()
+      ..color = Colors.black87
+      ..strokeWidth = 6.0
+      ..strokeCap = StrokeCap.butt
+      ..style = PaintingStyle.stroke;
+
     for (final group in beamedGroups) {
-      if (group.length < 2) continue; // Necesitamos al menos 2 notas para una barra
+      if (group.length < 2) continue;
 
       final noteOffsets = <Offset>[];
       final notePositions = <int>[];
 
       for (final note in group) {
         final noteX = hitLineX + ((note.absoluteTick - baseTick) * pxPerTick);
-        final position =
-            nv.NoteVisual.notePositions[nv.NoteVisual.basePitchKey(note.pitch)] ?? 5;
+        final position = nv.NoteVisual.notePositions[nv.NoteVisual.basePitchKey(note.pitch)] ?? 5;
         final noteY = sr.StaffRenderer.getNoteYPosition(staffTop, position);
         noteOffsets.add(Offset(noteX, noteY));
         notePositions.add(position);
@@ -286,16 +362,6 @@ class SMuFLRenderer extends CustomPainter {
       final clampedLastBeamY = naturalFirstBeamY +
           (naturalLastBeamY - naturalFirstBeamY).clamp(-maxBeamDelta, maxBeamDelta);
 
-      final stemPaint = Paint()
-        ..color = Colors.black87
-        ..strokeWidth = 2.0
-        ..style = PaintingStyle.stroke;
-      final beamPaint = Paint()
-        ..color = Colors.black87
-        ..strokeWidth = beamThickness
-        ..strokeCap = StrokeCap.butt
-        ..style = PaintingStyle.stroke;
-
       final maxBeamLevel = group
           .map(_maxBeamLevelForNote)
           .fold<int>(1, (currentMax, value) => value > currentMax ? value : currentMax);
@@ -304,6 +370,7 @@ class SMuFLRenderer extends CustomPainter {
       final normalizeStemLengthToPrimaryBeam =
           _isEighthTwoSixteenthsPattern(group) || dottedEighthSixteenthPattern;
 
+      // Dibujar stems
       for (int i = 0; i < group.length; i++) {
         final noteOffset = noteOffsets[i];
         final note = group[i];
@@ -326,12 +393,14 @@ class SMuFLRenderer extends CustomPainter {
         );
       }
 
+      // Dibujar beam principal (nivel 1)
       canvas.drawLine(
         Offset(firstStemX, naturalFirstBeamY),
         Offset(lastStemX, clampedLastBeamY),
         beamPaint,
       );
 
+      // Dibujar beams adicionales (niveles 2+)
       for (int level = 2; level <= maxBeamLevel; level++) {
         final levelOffset = (invertSecondaryBeamOffset && level == 2)
             ? -beamDirection * beamSpacing
@@ -378,8 +447,6 @@ class SMuFLRenderer extends CustomPainter {
           if (dottedEighthSixteenthPattern &&
               level == 2 &&
               note.duration == NoteDuration.sixteenth) {
-            // En grupos [corchea con punto, semicorchea] y [semicorchea, corchea con punto],
-            // el hook de semicorchea debe apuntar hacia el interior del grupo.
             hookToLeft = i == group.length - 1;
           }
           final startX = noteOffsets[i].dx + (stemUp ? 8 : -8);
@@ -408,19 +475,16 @@ class SMuFLRenderer extends CustomPainter {
 
   int _maxBeamLevelForNote(NoteModel note) {
     var maxLevel = note.beamType.isBeamed ? 1 : 0;
-
     for (final entry in note.beamLevels.entries) {
       if (entry.value != BeamType.none && entry.key > maxLevel) {
         maxLevel = entry.key;
       }
     }
-
     if (maxLevel == 1 &&
         note.duration == NoteDuration.sixteenth &&
         note.beamType.isBeamed) {
       maxLevel = 2;
     }
-
     return maxLevel == 0 ? 1 : maxLevel;
   }
 
@@ -432,32 +496,26 @@ class SMuFLRenderer extends CustomPainter {
     if (level == 1) return note.beamType;
     final beamType = note.beamLevels[level];
     if (beamType != null) return beamType;
-
     if (level == 2 &&
         note.duration == NoteDuration.sixteenth &&
         note.beamType.isBeamed) {
       return BeamType.continuation;
     }
-
     return BeamType.none;
   }
 
   bool _hasContinuousBeamBetween(NoteModel left, NoteModel right, int level) {
     final leftType = _effectiveBeamType(left, level);
     final rightType = _effectiveBeamType(right, level);
-
     final leftConnectsRight =
         leftType == BeamType.begin || leftType == BeamType.continuation;
     final rightConnectsLeft =
         rightType == BeamType.continuation || rightType == BeamType.end;
-
     return leftConnectsRight && rightConnectsLeft;
   }
 
   bool _shouldInvertSecondaryBeamOffset(List<NoteModel> group) {
-    if (_isEighthTwoSixteenthsPattern(group)) {
-      return true;
-    }
+    if (_isEighthTwoSixteenthsPattern(group)) return true;
     return _isDottedEighthSixteenthPattern(group);
   }
 
@@ -466,14 +524,12 @@ class SMuFLRenderer extends CustomPainter {
     final first = group[0].duration;
     final second = group[1].duration;
     final third = group[2].duration;
-
     final eighthThenTwoSixteenths = first == NoteDuration.eighth &&
         second == NoteDuration.sixteenth &&
         third == NoteDuration.sixteenth;
     final twoSixteenthsThenEighth = first == NoteDuration.sixteenth &&
         second == NoteDuration.sixteenth &&
         third == NoteDuration.eighth;
-
     return eighthThenTwoSixteenths || twoSixteenthsThenEighth;
   }
 
@@ -481,14 +537,12 @@ class SMuFLRenderer extends CustomPainter {
     if (group.length != 2) return false;
     final first = group[0];
     final second = group[1];
-
     final dottedEighthThenSixteenth = first.duration == NoteDuration.eighth &&
         first.isDotted &&
         second.duration == NoteDuration.sixteenth;
     final sixteenthThenDottedEighth = first.duration == NoteDuration.sixteenth &&
         second.duration == NoteDuration.eighth &&
         second.isDotted;
-
     return dottedEighthThenSixteenth || sixteenthThenDottedEighth;
   }
 
@@ -503,44 +557,29 @@ class SMuFLRenderer extends CustomPainter {
     if ((endX - startX).abs() < 0.001) {
       return startY + levelOffset;
     }
-
     final t = (x - startX) / (endX - startX);
     return startY + ((endY - startY) * t) + levelOffset;
   }
 
-  void _drawHitLine(Canvas canvas, Size size, double hitLineX) {
-    const double staffTop = compactStaffTop;
-
-    // Línea roja para marcar el beat
-    canvas.drawLine(
-      Offset(hitLineX, staffTop),
-      Offset(hitLineX, staffTop + 4 * sr.StaffRenderer.SPACE_HEIGHT),
-      Paint()
-        ..color = Colors.red.withOpacity(0.8)
-        ..strokeWidth = 3.0,
-    );
-
-    // Etiqueta "BEAT"
-    final textPainter = TextPainter(
-      text: const TextSpan(
-        text: 'BEAT',
-        style: TextStyle(
-          color: Colors.red,
-          fontSize: 12,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-      textDirection: TextDirection.ltr,
-    );
-    textPainter.layout();
-    textPainter.paint(
-      canvas,
-      Offset(hitLineX - textPainter.width / 2, 40),
-    );
-  }
+  // ============================================================
+  // SHOULD REPAINT (optimizado)
+  // ============================================================
 
   @override
   bool shouldRepaint(SMuFLRenderer oldDelegate) {
-    return true; // Redibujar en cada frame
+    // Solo repintar si realmente cambió algo importante
+    return oldDelegate.visibleNotes != visibleNotes ||
+        oldDelegate.pixelsPerTick != pixelsPerTick ||
+        oldDelegate.hitLineXOverride != hitLineXOverride ||
+        oldDelegate.showHitLine != showHitLine ||
+        oldDelegate.timeSignature != timeSignature ||
+        oldDelegate.keySignature != keySignature ||
+        oldDelegate.clefType != clefType ||
+        oldDelegate.showTimeSignature != showTimeSignature ||
+        oldDelegate.showKeySignature != showKeySignature ||
+        oldDelegate.showBarLines != showBarLines ||
+        oldDelegate.backgroundColor != backgroundColor ||
+        oldDelegate.staffColor != staffColor ||
+        oldDelegate.noteColor != noteColor;
   }
 }

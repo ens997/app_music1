@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
-
 import '../core/core.dart';
 
 /// Utilidades para pintar un subconjunto de glifos SMuFL usando Bravura.
 class BravuraGlyphs {
   static const String fontFamily = 'Bravura';
+
+  // --- Cache de TextPainter por clave (glyph+fontSize+color) ---
+  static final Map<String, TextPainter> _painterCache = {};
 
   static String clef(ClefType clefType) {
     switch (clefType) {
@@ -48,15 +50,15 @@ class BravuraGlyphs {
   static String individualNote(NoteDuration duration, {required bool stemUp}) {
     switch (duration) {
       case NoteDuration.whole:
-        return String.fromCharCode(0xE1D2); // noteWhole
+        return String.fromCharCode(0xE1D2);
       case NoteDuration.half:
-        return String.fromCharCode(stemUp ? 0xE1D3 : 0xE1D4); // noteHalfUp/Down
+        return String.fromCharCode(stemUp ? 0xE1D3 : 0xE1D4);
       case NoteDuration.quarter:
-        return String.fromCharCode(stemUp ? 0xE1D5 : 0xE1D6); // noteQuarterUp/Down
+        return String.fromCharCode(stemUp ? 0xE1D5 : 0xE1D6);
       case NoteDuration.eighth:
-        return String.fromCharCode(stemUp ? 0xE1D7 : 0xE1D8); // note8thUp/Down
+        return String.fromCharCode(stemUp ? 0xE1D7 : 0xE1D8);
       case NoteDuration.sixteenth:
-        return String.fromCharCode(stemUp ? 0xE1D9 : 0xE1DA); // note16thUp/Down
+        return String.fromCharCode(stemUp ? 0xE1D9 : 0xE1DA);
     }
   }
 
@@ -88,12 +90,18 @@ class BravuraGlyphs {
     }
   }
 
+  /// Construye un TextPainter con caché.
   static TextPainter buildPainter(
     String glyph, {
     required double fontSize,
     required Color color,
     FontWeight fontWeight = FontWeight.normal,
   }) {
+    final cacheKey = '$glyph|$fontSize|${color.value}|$fontWeight';
+    if (_painterCache.containsKey(cacheKey)) {
+      return _painterCache[cacheKey]!;
+    }
+
     final painter = TextPainter(
       text: TextSpan(
         text: glyph,
@@ -109,6 +117,7 @@ class BravuraGlyphs {
       textDirection: TextDirection.ltr,
     );
     painter.layout();
+    _painterCache[cacheKey] = painter;
     return painter;
   }
 
@@ -134,5 +143,10 @@ class BravuraGlyphs {
         center.dy - (painter.height / 2) + offset.dy,
       ),
     );
+  }
+
+  /// Limpia la caché (útil si cambia la fuente o para liberar memoria)
+  static void clearCache() {
+    _painterCache.clear();
   }
 }

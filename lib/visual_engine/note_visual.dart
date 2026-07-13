@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-
 import '../core/core.dart';
 import 'bravura_glyphs.dart';
 import 'staff_renderer.dart';
@@ -28,6 +27,26 @@ class NoteVisual {
     'C6': -4,
     'D6': -5,
   };
+
+  // --- PINCELES ESTÁTICOS (reutilizables) ---
+  static final Paint _stemPaint = Paint()
+    ..color = Colors.black
+    ..strokeWidth = 2.0
+    ..style = PaintingStyle.stroke;
+
+  static final Paint _dotPaint = Paint()
+    ..color = Colors.black
+    ..style = PaintingStyle.fill;
+
+  static final Paint _ledgerPaint = Paint()
+    ..color = Colors.black87
+    ..strokeWidth = StaffRenderer.STAFF_LINE_WIDTH
+    ..style = PaintingStyle.stroke;
+
+  // --- TextPainter reutilizable para etiquetas de notas ---
+  static final TextPainter _labelPainter = TextPainter(
+    textDirection: TextDirection.ltr,
+  );
 
   void renderNote(
     Canvas canvas,
@@ -150,9 +169,10 @@ class NoteVisual {
     if (duration == NoteDuration.whole) return;
     if (beamType.isBeamed) return;
 
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = 2.0;
+    // Reutilizar pincel, solo cambiar color si es necesario
+    if (_stemPaint.color != color) {
+      _stemPaint.color = color;
+    }
 
     final stemUp = notePosition >= 4;
     final stemLength = StaffRenderer.SPACE_HEIGHT * 3.5;
@@ -166,7 +186,7 @@ class NoteVisual {
     canvas.drawLine(
       Offset(startX, startY),
       Offset(startX, endY),
-      paint,
+      _stemPaint,
     );
 
     if (duration == NoteDuration.eighth || duration == NoteDuration.sixteenth) {
@@ -249,10 +269,12 @@ class NoteVisual {
       position.dx + StaffRenderer.SPACE_HEIGHT * 0.82,
       position.dy - StaffRenderer.SPACE_HEIGHT * 0.03,
     );
-    final paint = Paint()
-      ..color = color
-      ..style = PaintingStyle.fill;
-    canvas.drawCircle(center, radius, paint);
+
+    // Reutilizar pincel
+    if (_dotPaint.color != color) {
+      _dotPaint.color = color;
+    }
+    canvas.drawCircle(center, radius, _dotPaint);
   }
 
   static ({double fontSize, double xOffset, double yOffset}) _accidentalMetrics(
@@ -263,35 +285,15 @@ class NoteVisual {
 
     switch (accidental) {
       case Accidental.sharp:
-        return (
-          fontSize: fontSize,
-          xOffset: xOffset,
-          yOffset: -StaffRenderer.SPACE_HEIGHT * 0.08,
-        );
+        return (fontSize: fontSize, xOffset: xOffset, yOffset: -StaffRenderer.SPACE_HEIGHT * 0.08);
       case Accidental.flat:
-        return (
-          fontSize: fontSize,
-          xOffset: xOffset,
-          yOffset: StaffRenderer.SPACE_HEIGHT * 0.10,
-        );
+        return (fontSize: fontSize, xOffset: xOffset, yOffset: StaffRenderer.SPACE_HEIGHT * 0.10);
       case Accidental.doubleSharp:
-        return (
-          fontSize: fontSize,
-          xOffset: xOffset - (StaffRenderer.SPACE_HEIGHT * 0.05),
-          yOffset: -StaffRenderer.SPACE_HEIGHT * 0.02,
-        );
+        return (fontSize: fontSize, xOffset: xOffset - (StaffRenderer.SPACE_HEIGHT * 0.05), yOffset: -StaffRenderer.SPACE_HEIGHT * 0.02);
       case Accidental.doubleFlat:
-        return (
-          fontSize: fontSize,
-          xOffset: xOffset,
-          yOffset: StaffRenderer.SPACE_HEIGHT * 0.10,
-        );
+        return (fontSize: fontSize, xOffset: xOffset, yOffset: StaffRenderer.SPACE_HEIGHT * 0.10);
       case Accidental.natural:
-        return (
-          fontSize: fontSize,
-          xOffset: xOffset,
-          yOffset: -StaffRenderer.SPACE_HEIGHT * 0.02,
-        );
+        return (fontSize: fontSize, xOffset: xOffset, yOffset: -StaffRenderer.SPACE_HEIGHT * 0.02);
     }
   }
 
@@ -300,22 +302,19 @@ class NoteVisual {
     Offset position,
     NoteModel note,
   ) {
-    final textPainter = TextPainter(
-      text: TextSpan(
-        text: '${note.noteName}${note.octave}',
-        style: const TextStyle(
-          fontSize: 12,
-          color: Colors.blue,
-          fontWeight: FontWeight.w600,
-        ),
+    final text = '${note.noteName}${note.octave}';
+    _labelPainter.text = TextSpan(
+      text: text,
+      style: const TextStyle(
+        fontSize: 12,
+        color: Colors.blue,
+        fontWeight: FontWeight.w600,
       ),
-      textDirection: TextDirection.ltr,
     );
-
-    textPainter.layout();
-    textPainter.paint(
+    _labelPainter.layout();
+    _labelPainter.paint(
       canvas,
-      Offset(position.dx - textPainter.width / 2, position.dy),
+      Offset(position.dx - _labelPainter.width / 2, position.dy),
     );
   }
 

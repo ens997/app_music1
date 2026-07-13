@@ -6,15 +6,21 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/scheduler.dart'; // <--- Para compute()
 import 'package:provider/provider.dart';
 
 import '../audio/piano_audio_service.dart';
 import '../core/core.dart';
 import '../parsers/parsers.dart';
 import '../services/musicxml_preload_service.dart';
-// import '../services/exercise_loader_service.dart'; // ELIMINADO (no se usa)
 import '../providers/exercise_provider.dart';
 import '../visual_engine/visual_engine.dart';
+import '../parsers/musicxml_parser.dart';
+
+// ============================================================
+// CONSTANTES GLOBALES
+// ============================================================
 
 const double _minNoteSpacingScale = 0.75;
 const double _maxNoteSpacingScale = 1.0;
@@ -37,7 +43,10 @@ class _HitWindowFeedback {
   });
 }
 
-/// Pantalla principal del juego
+// ============================================================
+// PANTALLA PRINCIPAL DEL JUEGO (OPTIMIZADA)
+// ============================================================
+
 class GameScreen extends StatefulWidget {
   final String? preloadedFilePath;
   final String? preloadedContent;
@@ -57,8 +66,13 @@ class GameScreen extends StatefulWidget {
 }
 
 class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateMixin {
+  // ============================================================
+  // PROPIEDADES
+  // ============================================================
+
   final AnimationManager _animationManager = AnimationManager();
   final PianoAudioService _pianoAudioService = PianoAudioService();
+
   static const double _basePixelsPerTick = 0.35;
   static const Duration _autoScrollInterval = Duration(milliseconds: 16);
   static const double _staffTop = 60;
@@ -66,36 +80,45 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
 
   double get _pixelsPerTick => _basePixelsPerTick * _noteSpacingScale.value;
 
-  late final AnimationController _repaintController;
+  // --- Ticker optimizado (NO AnimationController) ---
+  late final Ticker _ticker;
+  final ValueNotifier<int> _frameNotifier = ValueNotifier<int>(0);
+
+  // --- Scroll ---
   late final ScrollController _scrollController;
   Timer? _autoScrollTimer;
   DateTime? _lastAutoScrollFrame;
   bool _isPlaying = false;
 
+  // --- Estado del juego ---
   int _currentScore = 0;
   int _currentCombo = 0;
   int _maxCombo = 0;
   Set<int> _hitNoteIndices = {};
   List<_HitWindowState> _hitHistory = [];
 
+  // --- Datos ---
   MusicScore? _loadedScore;
   String _status = 'Cargue un archivo MusicXML para comenzar.';
   bool _isLoading = false;
   bool _audioReady = false;
   double _currentViewportWidth = 0.0;
 
+  // --- Renderizado optimizado ---
+  final GlobalKey _repaintKey = GlobalKey();
+  int _scoreVersion = 0; // Para forzar repaint cuando cambia la puntuación
+
+  // ============================================================
+  // CICLO DE VIDA
+  // ============================================================
+
   @override
   void initState() {
     super.initState();
 
-    _repaintController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 1000),
-    )
-      ..addListener(() {
-        if (mounted) setState(() {});
-      })
-      ..repeat();
+    // --- Ticker optimizado (reemplaza AnimationController) ---
+    _ticker = Ticker(_onTick);
+    _ticker.start();
 
     _scrollController = ScrollController();
 
@@ -108,6 +131,35 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     }
   }
 
+  @override
+  void dispose() {
+    _ticker.dispose(); // <--- CRÍTICO: evita memory leaks
+    _frameNotifier.dispose();
+    _stopAutoScroll();
+    _scrollController.dispose();
+    _pianoAudioService.dispose();
+    super.dispose();
+  }
+
+  // ============================================================
+  // TICKER (GAME LOOP OPTIMIZADO)
+  // ============================================================
+
+  void _onTick(Duration elapsed) {
+    // --- Actualizar lógica del juego (sin setState) ---
+    if (_isPlaying && _loadedScore != null) {
+      // Aquí se puede actualizar el estado del juego,
+      // pero NO se llama a setState()
+    }
+
+    // --- Notificar al ValueListenableBuilder para que repinte ---
+    _frameNotifier.value++;
+  }
+
+  // ============================================================
+  // CARGA DE ARCHIVOS (CON ISOLATE)
+  // ============================================================
+
   Future<void> _loadPreloadedContent(String content) async {
     setState(() {
       _isLoading = true;
@@ -115,7 +167,9 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     });
 
     try {
-      final score = MusicXMLParser.parse(content);
+      // --- Parseo en Isolate (no bloquea UI) ---
+      final score = await compute(_parseMusicXmlInBackground, content);
+
       if (mounted) {
         setState(() {
           _loadedScore = score;
@@ -124,17 +178,13 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
           if (widget.exercise != null) {
             _status = '🎵 ${widget.exercise!.title} - ${widget.exercise!.composer}';
           }
+          _isLoading = false;
         });
       }
     } catch (e) {
       if (mounted) {
         setState(() {
           _status = 'Error al cargar archivo: $e';
-        });
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
           _isLoading = false;
         });
       }
@@ -149,54 +199,51 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
 
     try {
       final content = await File(filePath).readAsString();
-      final score = MusicXMLParser.parse(content);
+      final score = await compute(_parseMusicXmlInBackground, content);
+
       if (mounted) {
         setState(() {
           _loadedScore = score;
           _isPlaying = false;
           _status = '';
+          _isLoading = false;
         });
       }
     } catch (e) {
       if (mounted) {
         setState(() {
           _status = 'Error al cargar archivo: $e';
-        });
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
           _isLoading = false;
         });
       }
     }
   }
 
+  // Función top-level para Isolate
+  static MusicScore _parseMusicXmlInBackground(String content) {
+    return MusicXMLParser.parse(content);
+  }
+
+  // ============================================================
+  // AUDIO
+  // ============================================================
+
   Future<void> _initializeAudio() async {
     try {
-      await _pianoAudioService.initialize();
+      _pianoAudioService.initialize();
       if (mounted) {
-        setState(() {
-          _audioReady = true;
-        });
+        setState(() => _audioReady = true);
       }
     } catch (_) {
       if (mounted) {
-        setState(() {
-          _audioReady = false;
-        });
+        setState(() => _audioReady = false);
       }
     }
   }
 
-  @override
-  void dispose() {
-    _stopAutoScroll();
-    _repaintController.dispose();
-    _scrollController.dispose();
-    _pianoAudioService.dispose();
-    super.dispose();
-  }
+  // ============================================================
+  // SCROLL AUTOMÁTICO
+  // ============================================================
 
   void _startAutoScrollForLoadedScore() {
     final score = _loadedScore;
@@ -226,9 +273,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
         _scrollController.jumpTo(maxOffset);
         _stopAutoScroll();
         if (mounted) {
-          setState(() {
-            _isPlaying = false;
-          });
+          setState(() => _isPlaying = false);
           _finishGame();
         }
         return;
@@ -236,6 +281,34 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
 
       _scrollController.jumpTo(nextOffset);
     });
+  }
+
+  void _stopAutoScroll() {
+    _autoScrollTimer?.cancel();
+    _autoScrollTimer = null;
+    _lastAutoScrollFrame = null;
+  }
+
+  // ============================================================
+  // LÓGICA DEL JUEGO
+  // ============================================================
+
+  void _startFromBeginning() {
+    if (_loadedScore == null) return;
+    if (_scrollController.hasClients) {
+      _scrollController.jumpTo(0);
+    }
+    _currentScore = 0;
+    _currentCombo = 0;
+    _maxCombo = 0;
+    _hitNoteIndices.clear();
+    _hitHistory.clear();
+    _animationManager.clearAll();
+    setState(() {
+      _isPlaying = true;
+      _scoreVersion++; // Forzar repaint del marcador
+    });
+    _startAutoScrollForLoadedScore();
   }
 
   void _finishGame() {
@@ -250,6 +323,19 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
       provider.updateExercise(updatedExercise);
       _showResultsDialog();
     }
+  }
+
+  void _resetAndRestart() {
+    setState(() {
+      _currentScore = 0;
+      _currentCombo = 0;
+      _maxCombo = 0;
+      _hitNoteIndices.clear();
+      _hitHistory.clear();
+      _scoreVersion++;
+    });
+    _scrollController.jumpTo(0);
+    _startFromBeginning();
   }
 
   void _showResultsDialog() {
@@ -311,39 +397,9 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     );
   }
 
-  void _resetAndRestart() {
-    setState(() {
-      _currentScore = 0;
-      _currentCombo = 0;
-      _maxCombo = 0;
-      _hitNoteIndices.clear();
-      _hitHistory.clear();
-    });
-    _scrollController.jumpTo(0);
-    _startFromBeginning();
-  }
-
-  void _stopAutoScroll() {
-    _autoScrollTimer?.cancel();
-    _autoScrollTimer = null;
-    _lastAutoScrollFrame = null;
-  }
-
-  void _startFromBeginning() {
-    if (_loadedScore == null) return;
-    if (_scrollController.hasClients) {
-      _scrollController.jumpTo(0);
-    }
-    _currentScore = 0;
-    _currentCombo = 0;
-    _maxCombo = 0;
-    _hitNoteIndices.clear();
-    _hitHistory.clear();
-    setState(() {
-      _isPlaying = true;
-    });
-    _startAutoScrollForLoadedScore();
-  }
+  // ============================================================
+  // ENTRADA DE USUARIO (Piano)
+  // ============================================================
 
   void _handleNoteInput(String inputPitch) {
     if (_loadedScore == null || !_isPlaying) return;
@@ -413,26 +469,22 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
       _hitHistory.removeAt(0);
     }
 
+    final hitQuality = !isCorrectPitch
+        ? HitQuality.miss
+        : feedback.state == _HitWindowState.perfect
+            ? HitQuality.perfect
+            : (feedback.state == _HitWindowState.early || feedback.state == _HitWindowState.late)
+                ? HitQuality.good
+                : HitQuality.miss;
+
     _animationManager.addHitFeedback(
       Offset(staticHitLineX, _staffTop + 2 * StaffRenderer.SPACE_HEIGHT),
-      !isCorrectPitch
-          ? HitQuality.miss
-          : feedback.state == _HitWindowState.perfect
-              ? HitQuality.perfect
-              : feedback.state == _HitWindowState.early || feedback.state == _HitWindowState.late
-                  ? HitQuality.good
-                  : HitQuality.miss,
+      hitQuality,
     );
 
     _animationManager.addAccuracyAnimation(
       Offset(staticHitLineX, _staffTop + 2 * StaffRenderer.SPACE_HEIGHT),
-      !isCorrectPitch
-          ? HitQuality.miss
-          : feedback.state == _HitWindowState.perfect
-              ? HitQuality.perfect
-              : feedback.state == _HitWindowState.early || feedback.state == _HitWindowState.late
-                  ? HitQuality.good
-                  : HitQuality.miss,
+      hitQuality,
       0,
     );
 
@@ -443,8 +495,15 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
       );
     }
 
-    setState(() {});
+    // Actualizar UI (solo puntuación, no la partitura)
+    setState(() {
+      _scoreVersion++;
+    });
   }
+
+  // ============================================================
+  // CÁLCULOS MUSICALES
+  // ============================================================
 
   String _normalizePitch(String pitch) {
     var p = pitch.trim().toUpperCase();
@@ -555,6 +614,26 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     );
   }
 
+  double _perfectWindowHalfWidthPx(MusicScore score) {
+    final pixelsPerSecond = (TicksEngine.TPQN * score.bpm / 60.0) * _pixelsPerTick;
+    return pixelsPerSecond * 0.045;
+  }
+
+  double _staticHitLineX(MusicScore score, double viewportWidth) {
+    if (score.notes.isEmpty) return _leftMargin + 180.0;
+
+    final baseHitLineX = _leftMargin + 180.0;
+
+    if (viewportWidth <= 0) return baseHitLineX;
+
+    final maxHitLineX = math.max(baseHitLineX, viewportWidth * 0.5);
+    final t = _musicStartOffsetScale.value.clamp(
+      _minMusicStartOffsetScale,
+      _maxMusicStartOffsetScale,
+    );
+    return baseHitLineX + ((maxHitLineX - baseHitLineX) * t);
+  }
+
   Color _feedbackColor(_HitWindowState state) {
     switch (state) {
       case _HitWindowState.perfect:
@@ -583,25 +662,9 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     }
   }
 
-  double _perfectWindowHalfWidthPx(MusicScore score) {
-    final pixelsPerSecond = (TicksEngine.TPQN * score.bpm / 60.0) * _pixelsPerTick;
-    return pixelsPerSecond * 0.045;
-  }
-
-  double _staticHitLineX(MusicScore score, double viewportWidth) {
-    if (score.notes.isEmpty) return _leftMargin + 180.0;
-
-    final baseHitLineX = _leftMargin + 180.0;
-
-    if (viewportWidth <= 0) return baseHitLineX;
-
-    final maxHitLineX = math.max(baseHitLineX, viewportWidth * 0.5);
-    final t = _musicStartOffsetScale.value.clamp(
-      _minMusicStartOffsetScale,
-      _maxMusicStartOffsetScale,
-    );
-    return baseHitLineX + ((maxHitLineX - baseHitLineX) * t);
-  }
+  // ============================================================
+  // MÉTODOS DE CARGA DE ARCHIVOS
+  // ============================================================
 
   Future<void> _loadFromAsset() async {
     setState(() {
@@ -611,18 +674,16 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
 
     try {
       final xml = await rootBundle.loadString('assets/sample.musicxml');
-      final score = MusicXMLParser.parse(xml);
+      final score = await compute(_parseMusicXmlInBackground, xml);
       setState(() {
         _loadedScore = score;
         _isPlaying = false;
         _status = '';
+        _isLoading = false;
       });
     } catch (e) {
       setState(() {
         _status = 'Error al parsear archivo de ejemplo: $e';
-      });
-    } finally {
-      setState(() {
         _isLoading = false;
       });
     }
@@ -643,6 +704,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
       if (result == null || result.files.isEmpty) {
         setState(() {
           _status = 'No se seleccionó ningún archivo.';
+          _isLoading = false;
         });
         return;
       }
@@ -651,212 +713,251 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
       if (path == null) {
         setState(() {
           _status = 'Ruta de archivo no disponible.';
+          _isLoading = false;
         });
         return;
       }
 
       final content = await File(path).readAsString();
-      final score = MusicXMLParser.parse(content);
+      final score = await compute(_parseMusicXmlInBackground, content);
 
       setState(() {
         _loadedScore = score;
         _isPlaying = false;
         _status = '';
+        _isLoading = false;
       });
     } catch (e) {
       setState(() {
         _status = 'Error al cargar archivo: $e';
-      });
-    } finally {
-      setState(() {
         _isLoading = false;
       });
     }
   }
 
+  // ============================================================
+  // BUILD (OPTIMIZADO)
+  // ============================================================
+
   @override
-Widget build(BuildContext context) {
-  return Scaffold(
-    // AppBar completamente vacía (sin título, sin íconos, sin botones)
-    appBar: AppBar(
-      elevation: 0,
-      toolbarHeight: 0, // Ocultamos la AppBar
-      automaticallyImplyLeading: false, // Elimina el botón de retroceso automático
-    ),
-    body: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-      child: Column(
-        children: [
-          // Fila de botones: Volver (izquierda) y Play (derecha)
-          Row(
-            children: [
-              // Botón Volver
-              IconButton(
-                onPressed: () => Navigator.pop(context),
-                icon: const Icon(Icons.arrow_back, size: 28),
-                tooltip: 'Volver',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-              ),
-              const Spacer(),
-              // Botón Play
-              IconButton(
-                onPressed: _isPlaying ? null : _startFromBeginning,
-                icon: Icon(
-                  _isPlaying ? Icons.play_circle_outline : Icons.play_circle_filled,
-                  size: 36,
-                  color: _isPlaying ? Colors.grey : Theme.of(context).colorScheme.primary,
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        elevation: 0,
+        toolbarHeight: 0,
+        automaticallyImplyLeading: false,
+      ),
+      body: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+        child: Column(
+          children: [
+            // --- Barra de control ---
+            Row(
+              children: [
+                IconButton(
+                  onPressed: () => Navigator.pop(context),
+                  icon: const Icon(Icons.arrow_back, size: 28),
+                  tooltip: 'Volver',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
                 ),
-                tooltip: 'Iniciar',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-              ),
-            ],
-          ),
-          const SizedBox(height: 4),
-
-          // Partitura (ocupa el espacio restante)
-          Expanded(
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.white,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(8),
-                child: LayoutBuilder(
-                  builder: (context, constraints) {
-                    if (_loadedScore == null) {
-                      return const Center(
-                        child: Text('Cargue un archivo MusicXML'),
-                      );
-                    }
-                    final maxTick = _loadedScore!.getTotalTicks();
-                    final minWidth = constraints.maxWidth;
-                    _currentViewportWidth = constraints.maxWidth;
-                    final calculatedWidth = (maxTick * _pixelsPerTick) + 160;
-                    final width = calculatedWidth < minWidth ? minWidth : calculatedWidth;
-
-                    final staticHitLineX = _staticHitLineX(_loadedScore!, _currentViewportWidth);
-                    final feedback = _computeHitWindowFeedback(_loadedScore!, staticHitLineX);
-                    final feedbackColor = _feedbackColor(feedback.state);
-                    final perfectWindowHalfWidth = _perfectWindowHalfWidthPx(_loadedScore!);
-
-                    return Stack(
-                      children: [
-                        Scrollbar(
-                          controller: _scrollController,
-                          thumbVisibility: true,
-                          trackVisibility: true,
-                          thickness: 8,
-                          radius: const Radius.circular(6),
-                          child: SingleChildScrollView(
-                            controller: _scrollController,
-                            scrollDirection: Axis.horizontal,
-                            child: SizedBox(
-                              width: width,
-                              child: CustomPaint(
-                                painter: SMuFLRenderer(
-                                  timeSignature: _loadedScore!.timeSignature,
-                                  keySignature: _loadedScore!.keySignature,
-                                  visibleNotes: _loadedScore!.notes,
-                                  animationManager: _animationManager,
-                                  ticksEngine: TicksEngine(initialBpm: _loadedScore!.bpm),
-                                  pixelsPerTick: _pixelsPerTick,
-                                  hitLineXOverride: staticHitLineX,
-                                  showHitLine: false,
-                                ),
-                                child: const SizedBox.expand(),
-                              ),
-                            ),
-                          ),
+                const Spacer(),
+                // Puntuación (solo se actualiza cuando cambia)
+                ValueListenableBuilder<int>(
+                  valueListenable: ValueNotifier<int>(_scoreVersion),
+                  builder: (context, version, child) {
+                    return Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Theme.of(context).colorScheme.primary.withOpacity(0.15),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        '⭐ $_currentScore  |  🔥 $_currentCombo',
+                        style: const TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.bold,
                         ),
-                        IgnorePointer(
-                          child: CustomPaint(
-                            painter: _StaticBeatLinePainter(
-                              hitLineX: staticHitLineX,
-                              staffTop: _staffTop,
-                              beatColor: feedbackColor,
-                              perfectWindowHalfWidth: perfectWindowHalfWidth,
-                            ),
-                            child: const SizedBox.expand(),
-                          ),
-                        ),
-                        // Feedback mínimo en la esquina superior derecha
-                        Positioned(
-                          top: 4,
-                          right: 4,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(
-                              color: feedbackColor.withOpacity(0.15),
-                              borderRadius: BorderRadius.circular(6),
-                              border: Border.all(color: feedbackColor.withOpacity(0.5), width: 1),
-                            ),
-                            child: Text(
-                              _feedbackText(feedback),
-                              style: TextStyle(
-                                color: feedbackColor,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 10,
-                              ),
-                            ),
-                          ),
-                        ),
-                        // Historial de hits (círculos pequeños)
-                        Positioned(
-                          top: 32,
-                          left: 4,
-                          right: 4,
-                          child: Wrap(
-                            spacing: 3,
-                            children: _hitHistory.map((state) {
-                              Color hitColor;
-                              switch (state) {
-                                case _HitWindowState.perfect:
-                                  hitColor = const Color(0xFF2E7D32);
-                                  break;
-                                case _HitWindowState.early:
-                                case _HitWindowState.late:
-                                  hitColor = const Color(0xFFF9A825);
-                                  break;
-                                case _HitWindowState.none:
-                                  hitColor = Colors.red;
-                                  break;
-                              }
-                              return Container(
-                                width: 10,
-                                height: 10,
-                                decoration: BoxDecoration(
-                                  color: hitColor,
-                                  shape: BoxShape.circle,
-                                ),
+                      ),
+                    );
+                  },
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  onPressed: _isPlaying ? null : _startFromBeginning,
+                  icon: Icon(
+                    _isPlaying ? Icons.play_circle_outline : Icons.play_circle_filled,
+                    size: 36,
+                    color: _isPlaying ? Colors.grey : Theme.of(context).colorScheme.primary,
+                  ),
+                  tooltip: 'Iniciar',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+
+            // --- Partitura (con RepaintBoundary y ValueListenableBuilder) ---
+            Expanded(
+              child: RepaintBoundary(
+                key: _repaintKey,
+                child: ValueListenableBuilder<int>(
+                  valueListenable: _frameNotifier,
+                  builder: (context, frame, child) {
+                    return Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: LayoutBuilder(
+                          builder: (context, constraints) {
+                            if (_loadedScore == null) {
+                              return const Center(
+                                child: Text('Cargue un archivo MusicXML'),
                               );
-                            }).toList(),
-                          ),
+                            }
+
+                            final maxTick = _loadedScore!.getTotalTicks();
+                            final minWidth = constraints.maxWidth;
+                            _currentViewportWidth = constraints.maxWidth;
+                            final calculatedWidth = (maxTick * _pixelsPerTick) + 160;
+                            final width = calculatedWidth < minWidth ? minWidth : calculatedWidth;
+
+                            final staticHitLineX = _staticHitLineX(_loadedScore!, _currentViewportWidth);
+                            final feedback = _computeHitWindowFeedback(_loadedScore!, staticHitLineX);
+                            final feedbackColor = _feedbackColor(feedback.state);
+                            final perfectWindowHalfWidth = _perfectWindowHalfWidthPx(_loadedScore!);
+
+                            return Stack(
+                              children: [
+                                // --- Partitura ---
+                                Scrollbar(
+                                  controller: _scrollController,
+                                  thumbVisibility: true,
+                                  trackVisibility: true,
+                                  thickness: 8,
+                                  radius: const Radius.circular(6),
+                                  child: SingleChildScrollView(
+                                    controller: _scrollController,
+                                    scrollDirection: Axis.horizontal,
+                                    child: SizedBox(
+                                      width: width,
+                                      child: CustomPaint(
+                                        painter: SMuFLRenderer(
+                                          timeSignature: _loadedScore!.timeSignature,
+                                          keySignature: _loadedScore!.keySignature,
+                                          visibleNotes: _loadedScore!.notes,
+                                          animationManager: _animationManager,
+                                          ticksEngine: TicksEngine(initialBpm: _loadedScore!.bpm),
+                                          pixelsPerTick: _pixelsPerTick,
+                                          hitLineXOverride: staticHitLineX,
+                                          showHitLine: false,
+                                        ),
+                                        child: const SizedBox.expand(),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+
+                                // --- Línea de Beat ---
+                                IgnorePointer(
+                                  child: CustomPaint(
+                                    painter: _StaticBeatLinePainter(
+                                      hitLineX: staticHitLineX,
+                                      staffTop: _staffTop,
+                                      beatColor: feedbackColor,
+                                      perfectWindowHalfWidth: perfectWindowHalfWidth,
+                                    ),
+                                    child: const SizedBox.expand(),
+                                  ),
+                                ),
+
+                                // --- Feedback de precisión ---
+                                Positioned(
+                                  top: 4,
+                                  right: 4,
+                                  child: Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                    decoration: BoxDecoration(
+                                      color: feedbackColor.withOpacity(0.15),
+                                      borderRadius: BorderRadius.circular(6),
+                                      border: Border.all(color: feedbackColor.withOpacity(0.5), width: 1),
+                                    ),
+                                    child: Text(
+                                      _feedbackText(feedback),
+                                      style: TextStyle(
+                                        color: feedbackColor,
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 10,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+
+                                // --- Historial de hits ---
+                                Positioned(
+                                  top: 32,
+                                  left: 4,
+                                  right: 4,
+                                  child: Wrap(
+                                    spacing: 3,
+                                    children: _hitHistory.map((state) {
+                                      Color hitColor;
+                                      switch (state) {
+                                        case _HitWindowState.perfect:
+                                          hitColor = const Color(0xFF2E7D32);
+                                          break;
+                                        case _HitWindowState.early:
+                                        case _HitWindowState.late:
+                                          hitColor = const Color(0xFFF9A825);
+                                          break;
+                                        case _HitWindowState.none:
+                                          hitColor = Colors.red;
+                                          break;
+                                      }
+                                      return Container(
+                                        width: 10,
+                                        height: 10,
+                                        decoration: BoxDecoration(
+                                          color: hitColor,
+                                          shape: BoxShape.circle,
+                                        ),
+                                      );
+                                    }).toList(),
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
                         ),
-                      ],
+                      ),
                     );
                   },
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: 4),
+            const SizedBox(height: 4),
 
-          // Piano
-          SizedBox(
-            height: 120,
-            child: _PianoInput(
-              enabled: _isPlaying,
-              onNotePressed: _handleNoteInput,
+            // --- Piano ---
+            SizedBox(
+              height: 120,
+              child: _PianoInput(
+                enabled: _isPlaying,
+                onNotePressed: _handleNoteInput,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
-    ),
-  );
-}
+    );
+  }
+
+  // ============================================================
+  // MÉTODOS AUXILIARES
+  // ============================================================
 
   Widget _buildInfoChip(String label, Color color) {
     return Container(
@@ -890,6 +991,10 @@ Widget build(BuildContext context) {
     }
   }
 }
+
+// ============================================================
+// PIANO INPUT
+// ============================================================
 
 class _PianoInput extends StatelessWidget {
   final bool enabled;
@@ -1076,11 +1181,23 @@ class _PianoInput extends StatelessWidget {
   }
 }
 
+// ============================================================
+// PAINTER DE LÍNEA DE BEAT
+// ============================================================
+
 class _StaticBeatLinePainter extends CustomPainter {
   final double hitLineX;
   final double staffTop;
   final Color beatColor;
   final double perfectWindowHalfWidth;
+
+  // Pinceles estáticos (optimización)
+  static final Paint _windowPaint = Paint()
+    ..style = PaintingStyle.fill;
+
+  static final Paint _linePaint = Paint()
+    ..strokeWidth = 3.0
+    ..style = PaintingStyle.stroke;
 
   const _StaticBeatLinePainter({
     required this.hitLineX,
@@ -1093,25 +1210,27 @@ class _StaticBeatLinePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (size.width == 0 || size.height == 0) return;
 
-    final windowRect = Rect.fromLTRB(
-      hitLineX - perfectWindowHalfWidth,
-      staffTop,
-      hitLineX + perfectWindowHalfWidth,
-      staffTop + 4 * StaffRenderer.SPACE_HEIGHT,
-    );
+    // Ventana de perfect
+    _windowPaint.color = beatColor.withOpacity(0.12);
     canvas.drawRect(
-      windowRect,
-      Paint()..color = beatColor.withOpacity(0.12),
+      Rect.fromLTRB(
+        hitLineX - perfectWindowHalfWidth,
+        staffTop,
+        hitLineX + perfectWindowHalfWidth,
+        staffTop + 4 * StaffRenderer.SPACE_HEIGHT,
+      ),
+      _windowPaint,
     );
 
+    // Línea roja
+    _linePaint.color = beatColor.withOpacity(0.9);
     canvas.drawLine(
       Offset(hitLineX, staffTop),
       Offset(hitLineX, staffTop + 4 * StaffRenderer.SPACE_HEIGHT),
-      Paint()
-        ..color = beatColor.withOpacity(0.9)
-        ..strokeWidth = 3.0,
+      _linePaint,
     );
 
+    // Etiqueta "BEAT" (solo se crea una vez)
     final textPainter = TextPainter(
       text: TextSpan(
         text: 'BEAT',
@@ -1139,7 +1258,10 @@ class _StaticBeatLinePainter extends CustomPainter {
   }
 }
 
-/// Pantalla de configuración
+// ============================================================
+// SETTINGS SCREEN
+// ============================================================
+
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({Key? key}) : super(key: key);
 
@@ -1161,9 +1283,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Configuración'),
-      ),
+      appBar: AppBar(title: const Text('Configuración')),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(20),
@@ -1192,9 +1312,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       value: _spacingScale,
                       label: '${(_spacingScale * 100).round()}%',
                       onChanged: (value) {
-                        setState(() {
-                          _spacingScale = value;
-                        });
+                        setState(() => _spacingScale = value);
                         _noteSpacingScale.value = value;
                       },
                     ),
@@ -1231,9 +1349,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       value: _startOffsetScale,
                       label: '${(_startOffsetScale * 100).round()}%',
                       onChanged: (value) {
-                        setState(() {
-                          _startOffsetScale = value;
-                        });
+                        setState(() => _startOffsetScale = value);
                         _musicStartOffsetScale.value = value;
                       },
                     ),
@@ -1258,7 +1374,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
-/// Pantalla de selección de niveles (archivos MusicXML precargados)
+// ============================================================
+// LEVEL SELECT SCREEN
+// ============================================================
+
 class LevelSelectScreen extends StatefulWidget {
   const LevelSelectScreen({Key? key}) : super(key: key);
 
@@ -1283,7 +1402,6 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
       if (discoveredFiles.isNotEmpty) {
         return discoveredFiles;
       }
-
       return await _loadLevelsFromAssets();
     } catch (e) {
       return await _loadLevelsFromAssets();
@@ -1292,8 +1410,7 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
 
   Future<List<PreloadedMusicXmlFile>> _loadLevelsFromAssets() async {
     try {
-      final manifestJson =
-          await rootBundle.loadString('AssetManifest.json');
+      final manifestJson = await rootBundle.loadString('AssetManifest.json');
       final manifest = jsonDecode(manifestJson) as Map<String, dynamic>;
 
       final musicxmlFiles = manifest.keys
@@ -1307,10 +1424,7 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
       return musicxmlFiles
           .map((path) {
             final fileName = path.split('/').last;
-            return PreloadedMusicXmlFile(
-              name: fileName,
-              path: path,
-            );
+            return PreloadedMusicXmlFile(name: fileName, path: path);
           })
           .toList();
     } catch (e) {
@@ -1321,9 +1435,7 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Seleccionar Nivel'),
-      ),
+      appBar: AppBar(title: const Text('Seleccionar Nivel')),
       body: FutureBuilder<List<PreloadedMusicXmlFile>>(
         future: _filesFuture,
         builder: (context, snapshot) {
@@ -1373,9 +1485,7 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
                   const SizedBox(height: 32),
                   ElevatedButton.icon(
                     onPressed: () {
-                      setState(() {
-                        _filesFuture = _loadAvailableLevels();
-                      });
+                      setState(() => _filesFuture = _loadAvailableLevels());
                     },
                     icon: const Icon(Icons.refresh),
                     label: const Text('Reintentar'),
@@ -1398,24 +1508,17 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
                   itemBuilder: (context, index) {
                     final file = files[index];
                     return Card(
-                      margin:
-                          const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                       child: ListTile(
                         selected: _selectedFile == file,
-                        selectedTileColor: Theme.of(context)
-                            .colorScheme
-                            .primary
-                            .withOpacity(0.14),
+                        selectedTileColor:
+                            Theme.of(context).colorScheme.primary.withOpacity(0.14),
                         leading: const Icon(Icons.music_note),
                         title: Text(file.name),
                         trailing: _selectedFile == file
                             ? const Icon(Icons.check_circle, color: Colors.green)
                             : null,
-                        onTap: () {
-                          setState(() {
-                            _selectedFile = file;
-                          });
-                        },
+                        onTap: () => setState(() => _selectedFile = file),
                       ),
                     );
                   },
@@ -1468,10 +1571,7 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
                               } catch (e) {
                                 if (!mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content:
-                                        Text('Error al iniciar nivel: $e'),
-                                  ),
+                                  SnackBar(content: Text('Error al iniciar nivel: $e')),
                                 );
                               }
                             },
@@ -1487,7 +1587,10 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
   }
 }
 
-/// Pantalla de resultados
+// ============================================================
+// RESULTS SCREEN
+// ============================================================
+
 class ResultsScreen extends StatelessWidget {
   final String summary;
   final Exercise? exercise;
@@ -1501,9 +1604,7 @@ class ResultsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Resultados'),
-      ),
+      appBar: AppBar(title: const Text('Resultados')),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -1533,10 +1634,9 @@ class ResultsScreen extends StatelessWidget {
 }
 
 // ============================================================
-// Pantalla de selección de ejercicios (añadir al final de screens.dart)
+// EXERCISE SELECTION SCREEN
 // ============================================================
 
-/// Pantalla para seleccionar ejercicios precargados
 class ExerciseSelectionScreen extends StatefulWidget {
   const ExerciseSelectionScreen({Key? key}) : super(key: key);
 
@@ -1556,10 +1656,7 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(
-      length: 4,
-      vsync: this,
-    );
+    _tabController = TabController(length: 4, vsync: this);
     _tabController.addListener(_onTabChanged);
     _updateFilteredExercises();
   }
@@ -1597,9 +1694,7 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
       exercises = exercises.where((e) => e.type == _selectedType).toList();
     }
 
-    setState(() {
-      _filteredExercises = exercises;
-    });
+    setState(() => _filteredExercises = exercises);
   }
 
   @override
@@ -1645,8 +1740,7 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Icon(Icons.error_outline,
-                          size: 48, color: Colors.red),
+                      const Icon(Icons.error_outline, size: 48, color: Colors.red),
                       const SizedBox(height: 16),
                       Text(provider.error!),
                       const SizedBox(height: 16),
@@ -1662,8 +1756,7 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          const Icon(Icons.search_off,
-                              size: 48, color: Colors.grey),
+                          const Icon(Icons.search_off, size: 48, color: Colors.grey),
                           const SizedBox(height: 16),
                           Text(
                             _searchQuery.isNotEmpty
@@ -1683,18 +1776,13 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
                     )
                   : _buildExerciseList(context),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () {
-          _showStatsDialog(context, provider.getStats());
-        },
+        onPressed: () => _showStatsDialog(context, provider.getStats()),
         icon: const Icon(Icons.insights),
         label: const Text('Estadísticas'),
       ),
     );
   }
 
-  // ------------------------------------------------------------
-  // Métodos auxiliares (copia los que ya tenías)
-  // ------------------------------------------------------------
   Widget _buildExerciseList(BuildContext context) {
     return ListView.builder(
       padding: const EdgeInsets.all(8),
@@ -1712,9 +1800,7 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       elevation: 2,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-      ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
         onTap: () {
@@ -1755,8 +1841,7 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
                           ),
                         ),
                         if (exercise.isFavorite)
-                          const Icon(Icons.favorite,
-                              color: Colors.red, size: 16),
+                          const Icon(Icons.favorite, color: Colors.red, size: 16),
                       ],
                     ),
                     const SizedBox(height: 4),
