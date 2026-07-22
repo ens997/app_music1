@@ -6,8 +6,6 @@ import 'dart:convert';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/scheduler.dart'; // <--- Para compute()
 import 'package:provider/provider.dart';
 
 import '../audio/piano_audio_service.dart';
@@ -16,11 +14,7 @@ import '../parsers/parsers.dart';
 import '../services/musicxml_preload_service.dart';
 import '../providers/exercise_provider.dart';
 import '../visual_engine/visual_engine.dart';
-import '../parsers/musicxml_parser.dart';
-
-// ============================================================
-// CONSTANTES GLOBALES
-// ============================================================
+import '../game/game.dart';
 
 const double _minNoteSpacingScale = 0.75;
 const double _maxNoteSpacingScale = 1.0;
@@ -29,24 +23,11 @@ const double _minMusicStartOffsetScale = 0.0;
 const double _maxMusicStartOffsetScale = 1.0;
 final ValueNotifier<double> _musicStartOffsetScale = ValueNotifier<double>(_minMusicStartOffsetScale);
 
-enum _HitWindowState { none, early, perfect, late }
 
-class _HitWindowFeedback {
-  final _HitWindowState state;
-  final double deltaMs;
-  final String? notePitch;
 
-  const _HitWindowFeedback({
-    required this.state,
-    required this.deltaMs,
-    this.notePitch,
-  });
-}
 
-// ============================================================
-// PANTALLA PRINCIPAL DEL JUEGO (OPTIMIZADA)
-// ============================================================
 
+/// Pantalla principal del juego
 class GameScreen extends StatefulWidget {
   final String? preloadedFilePath;
   final String? preloadedContent;
@@ -66,62 +47,39 @@ class GameScreen extends StatefulWidget {
 }
 
 class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateMixin {
-  // ============================================================
-  // PROPIEDADES
-  // ============================================================
-
   final AnimationManager _animationManager = AnimationManager();
   final PianoAudioService _pianoAudioService = PianoAudioService();
-
   static const double _basePixelsPerTick = 0.35;
   static const Duration _autoScrollInterval = Duration(milliseconds: 16);
   static const double _staffTop = 60;
   static const double _leftMargin = 80;
 
-  double get _pixelsPerTick => _basePixelsPerTick * _noteSpacingScale.value;
-
-  // --- Ticker optimizado (NO AnimationController) ---
-  late final Ticker _ticker;
-  final ValueNotifier<int> _frameNotifier = ValueNotifier<int>(0);
-
-  // --- Scroll ---
+  late final AnimationController _repaintController;
   late final ScrollController _scrollController;
   Timer? _autoScrollTimer;
   DateTime? _lastAutoScrollFrame;
   bool _isPlaying = false;
 
-  // --- Estado del juego ---
-  int _currentScore = 0;
-  int _currentCombo = 0;
-  int _maxCombo = 0;
-  Set<int> _hitNoteIndices = {};
-  List<_HitWindowState> _hitHistory = [];
-
-  // --- Datos ---
+  
+  GameSession? _gameSession;
   MusicScore? _loadedScore;
-  String _status = 'Cargue un archivo MusicXML para comenzar.';
   bool _isLoading = false;
-  bool _audioReady = false;
+  String _status = 'Cargue un archivo MusicXML para comenzar.';
   double _currentViewportWidth = 0.0;
-
-  // --- Renderizado optimizado ---
-  final GlobalKey _repaintKey = GlobalKey();
-  int _scoreVersion = 0; // Para forzar repaint cuando cambia la puntuación
-
-  // ============================================================
-  // CICLO DE VIDA
-  // ============================================================
 
   @override
   void initState() {
     super.initState();
-
-    // --- Ticker optimizado (reemplaza AnimationController) ---
-    _ticker = Ticker(_onTick);
-    _ticker.start();
+    _repaintController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1000),
+    )
+      ..addListener(() {
+        if (mounted) setState(() {});
+      })
+      ..repeat();
 
     _scrollController = ScrollController();
-
     _initializeAudio();
 
     if (widget.preloadedContent != null) {
@@ -131,63 +89,40 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     }
   }
 
-  @override
-  void dispose() {
-    _ticker.dispose(); // <--- CRÍTICO: evita memory leaks
-    _frameNotifier.dispose();
-    _stopAutoScroll();
-    _scrollController.dispose();
-    _pianoAudioService.dispose();
-    super.dispose();
-  }
-
-  // ============================================================
-  // TICKER (GAME LOOP OPTIMIZADO)
-  // ============================================================
-
-  void _onTick(Duration elapsed) {
-    // --- Actualizar lógica del juego (sin setState) ---
-    if (_isPlaying && _loadedScore != null) {
-      // Aquí se puede actualizar el estado del juego,
-      // pero NO se llama a setState()
-    }
-
-    // --- Notificar al ValueListenableBuilder para que repinte ---
-    _frameNotifier.value++;
-  }
-
-  // ============================================================
-  // CARGA DE ARCHIVOS (CON ISOLATE)
-  // ============================================================
-
+  // ===== MÉTODOS DE CARGA =====
   Future<void> _loadPreloadedContent(String content) async {
     setState(() {
       _isLoading = true;
       _status = 'Cargando archivo...';
     });
-
     try {
-      // --- Parseo en Isolate (no bloquea UI) ---
-      final score = await compute(_parseMusicXmlInBackground, content);
-
+      final score = MusicXMLParser.parse(content);
       if (mounted) {
         setState(() {
           _loadedScore = score;
           _isPlaying = false;
           _status = '';
+          // Crear la sesión de juego
+          _gameSession = GameSession(
+            ticksEngine: TicksEngine(initialBpm: score.bpm),
+            scoreEngine: ScoreEngine(),
+            musicScore: score,
+          );
+          _gameSession!.onNoteHit(() {
+            if (mounted) setState(() {});
+          });
+          _gameSession!.onScoreChange(() {
+            if (mounted) setState(() {});
+          });
           if (widget.exercise != null) {
             _status = '🎵 ${widget.exercise!.title} - ${widget.exercise!.composer}';
           }
-          _isLoading = false;
         });
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _status = 'Error al cargar archivo: $e';
-          _isLoading = false;
-        });
-      }
+      if (mounted) setState(() => _status = 'Error al cargar archivo: $e');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -196,128 +131,63 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
       _isLoading = true;
       _status = 'Cargando archivo...';
     });
-
     try {
       final content = await File(filePath).readAsString();
-      final score = await compute(_parseMusicXmlInBackground, content);
-
+      final score = MusicXMLParser.parse(content);
       if (mounted) {
         setState(() {
           _loadedScore = score;
           _isPlaying = false;
           _status = '';
-          _isLoading = false;
+          _gameSession = GameSession(
+            ticksEngine: TicksEngine(initialBpm: score.bpm),
+            scoreEngine: ScoreEngine(),
+            musicScore: score,
+          );
+          _gameSession!.onNoteHit(() {
+            if (mounted) setState(() {});
+          });
+          _gameSession!.onScoreChange(() {
+            if (mounted) setState(() {});
+          });
         });
       }
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _status = 'Error al cargar archivo: $e';
-          _isLoading = false;
-        });
-      }
+      if (mounted) setState(() => _status = 'Error al cargar archivo: $e');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
-
-  // Función top-level para Isolate
-  static MusicScore _parseMusicXmlInBackground(String content) {
-    return MusicXMLParser.parse(content);
-  }
-
-  // ============================================================
-  // AUDIO
-  // ============================================================
 
   Future<void> _initializeAudio() async {
     try {
-      _pianoAudioService.initialize();
-      if (mounted) {
-        setState(() => _audioReady = true);
-      }
+      await _pianoAudioService.initialize();
+      if (mounted) setState(() {});
     } catch (_) {
-      if (mounted) {
-        setState(() => _audioReady = false);
-      }
+      if (mounted) setState(() {});
     }
   }
 
-  // ============================================================
-  // SCROLL AUTOMÁTICO
-  // ============================================================
-
-  void _startAutoScrollForLoadedScore() {
-    final score = _loadedScore;
-    if (score == null) return;
-
-    _stopAutoScroll();
-    _lastAutoScrollFrame = DateTime.now();
-
-    _autoScrollTimer = Timer.periodic(_autoScrollInterval, (_) {
-      if (!mounted || !_scrollController.hasClients) return;
-
-      final ticksPerSecond = (TicksEngine.TPQN * score.bpm) / 60.0;
-      final pixelsPerSecond = ticksPerSecond * _pixelsPerTick;
-
-      final now = DateTime.now();
-      final last = _lastAutoScrollFrame ?? now;
-      _lastAutoScrollFrame = now;
-
-      final dtSeconds = now.difference(last).inMicroseconds / 1000000.0;
-      if (dtSeconds <= 0) return;
-
-      final currentOffset = _scrollController.offset;
-      final maxOffset = _scrollController.position.maxScrollExtent;
-      final nextOffset = currentOffset + (pixelsPerSecond * dtSeconds);
-
-      if (nextOffset >= maxOffset) {
-        _scrollController.jumpTo(maxOffset);
-        _stopAutoScroll();
-        if (mounted) {
-          setState(() => _isPlaying = false);
-          _finishGame();
-        }
-        return;
-      }
-
-      _scrollController.jumpTo(nextOffset);
-    });
-  }
-
-  void _stopAutoScroll() {
-    _autoScrollTimer?.cancel();
-    _autoScrollTimer = null;
-    _lastAutoScrollFrame = null;
-  }
-
-  // ============================================================
-  // LÓGICA DEL JUEGO
-  // ============================================================
-
+  // ===== MÉTODOS DE CONTROL DEL JUEGO =====
   void _startFromBeginning() {
-    if (_loadedScore == null) return;
-    if (_scrollController.hasClients) {
-      _scrollController.jumpTo(0);
-    }
-    _currentScore = 0;
-    _currentCombo = 0;
-    _maxCombo = 0;
-    _hitNoteIndices.clear();
-    _hitHistory.clear();
-    _animationManager.clearAll();
+    if (_gameSession == null) return;
+    _gameSession!.restart();
+    _gameSession!.start();
     setState(() {
       _isPlaying = true;
-      _scoreVersion++; // Forzar repaint del marcador
+      _status = '';
     });
     _startAutoScrollForLoadedScore();
   }
 
   void _finishGame() {
+    _gameSession?.finish();
     if (widget.exercise != null && mounted) {
       final provider = context.read<ExerciseProvider>();
       final updatedExercise = widget.exercise!.copyWith(
         timesCompleted: widget.exercise!.timesCompleted + 1,
-        bestScore: _currentScore > widget.exercise!.bestScore
-            ? _currentScore.toDouble()
+        bestScore: _gameSession!.currentScore > widget.exercise!.bestScore
+            ? _gameSession!.currentScore.toDouble()
             : widget.exercise!.bestScore,
       );
       provider.updateExercise(updatedExercise);
@@ -326,15 +196,9 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
   }
 
   void _resetAndRestart() {
-    setState(() {
-      _currentScore = 0;
-      _currentCombo = 0;
-      _maxCombo = 0;
-      _hitNoteIndices.clear();
-      _hitHistory.clear();
-      _scoreVersion++;
-    });
+    _gameSession?.restart();
     _scrollController.jumpTo(0);
+    setState(() {});
     _startFromBeginning();
   }
 
@@ -350,17 +214,17 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
             const Icon(Icons.emoji_events, size: 64, color: Colors.amber),
             const SizedBox(height: 16),
             Text(
-              'Puntuación: $_currentScore',
+              'Puntuación: ${_gameSession?.currentScore ?? 0}',
               style: const TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 8),
             Text(
-              'Combo Máximo: $_maxCombo',
+              'Combo Máximo: ${_gameSession?.maxCombo ?? 0}',
               style: const TextStyle(fontSize: 18),
             ),
             const SizedBox(height: 8),
             Text(
-              'Notas Acertadas: ${_hitNoteIndices.length}',
+              'Notas Acertadas: ${_gameSession?.hitNoteIndices.length ?? 0}',
               style: const TextStyle(fontSize: 18),
             ),
             const SizedBox(height: 16),
@@ -397,235 +261,63 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     );
   }
 
-  // ============================================================
-  // ENTRADA DE USUARIO (Piano)
-  // ============================================================
+  // ===== SCROLL AUTOMÁTICO =====
+  void _startAutoScrollForLoadedScore() {
+    final score = _loadedScore;
+    if (score == null) return;
+    _stopAutoScroll();
+    _lastAutoScrollFrame = DateTime.now();
 
-  void _handleNoteInput(String inputPitch) {
-    if (_loadedScore == null || !_isPlaying) return;
+    _autoScrollTimer = Timer.periodic(_autoScrollInterval, (_) {
+      if (!mounted || !_scrollController.hasClients) return;
 
-    final staticHitLineX = _staticHitLineX(_loadedScore!, _currentViewportWidth);
-    final feedback = _computeHitWindowFeedback(_loadedScore!, staticHitLineX);
+      final ticksPerSecond = (TicksEngine.tpnq * score.bpm) / 60.0;
+      final pixelsPerSecond = ticksPerSecond * _pixelsPerTick;
 
-    if (feedback.state == _HitWindowState.none) return;
+      final now = DateTime.now();
+      final last = _lastAutoScrollFrame ?? now;
+      _lastAutoScrollFrame = now;
 
-    final scrollOffset =
-        _scrollController.hasClients ? _scrollController.offset : 0.0;
+      final dtSeconds = now.difference(last).inMicroseconds / 1000000.0;
+      if (dtSeconds <= 0) return;
 
-    NoteModel? hitNote;
-    int hitNoteIndex = -1;
+      final currentOffset = _scrollController.offset;
+      final maxOffset = _scrollController.position.maxScrollExtent;
+      final nextOffset = currentOffset + (pixelsPerSecond * dtSeconds);
 
-    for (int i = 0; i < _loadedScore!.notes.length; i++) {
-      final note = _loadedScore!.notes[i];
-      if (_hitNoteIndices.contains(i)) continue;
-
-      final noteScoreX = _scoreXForTick(_loadedScore!, note.absoluteTick, staticHitLineX);
-      final noteScreenX = noteScoreX - scrollOffset;
-      final deltaPx = (noteScreenX - staticHitLineX).abs();
-
-      if (deltaPx < 50.0) {
-        hitNote = note;
-        hitNoteIndex = i;
-        break;
+      if (nextOffset >= maxOffset) {
+        _scrollController.jumpTo(maxOffset);
+        _stopAutoScroll();
+        if (mounted) {
+          setState(() => _isPlaying = false);
+          _finishGame();
+        }
+        return;
       }
-    }
-
-    if (hitNote == null || hitNoteIndex < 0) return;
-
-    _hitNoteIndices.add(hitNoteIndex);
-
-    final expectedPitch = _normalizePitch(hitNote.pitch);
-    final playedPitch = _normalizePitch(inputPitch);
-    final isCorrectPitch = expectedPitch == playedPitch;
-
-    if (isCorrectPitch && _audioReady) {
-      _pianoAudioService.playNote(expectedPitch);
-    }
-
-    int points = 0;
-    switch (feedback.state) {
-      case _HitWindowState.perfect:
-        points = isCorrectPitch ? 100 : 20;
-        _currentCombo = isCorrectPitch ? _currentCombo + 1 : 0;
-        break;
-      case _HitWindowState.early:
-      case _HitWindowState.late:
-        points = isCorrectPitch ? 50 : 10;
-        _currentCombo = isCorrectPitch ? _currentCombo + 1 : 0;
-        break;
-      case _HitWindowState.none:
-        _currentCombo = 0;
-        break;
-    }
-
-    if (_currentCombo > _maxCombo) {
-      _maxCombo = _currentCombo;
-    }
-
-    _currentScore += points;
-
-    _hitHistory.add(feedback.state);
-    if (_hitHistory.length > 12) {
-      _hitHistory.removeAt(0);
-    }
-
-    final hitQuality = !isCorrectPitch
-        ? HitQuality.miss
-        : feedback.state == _HitWindowState.perfect
-            ? HitQuality.perfect
-            : (feedback.state == _HitWindowState.early || feedback.state == _HitWindowState.late)
-                ? HitQuality.good
-                : HitQuality.miss;
-
-    _animationManager.addHitFeedback(
-      Offset(staticHitLineX, _staffTop + 2 * StaffRenderer.SPACE_HEIGHT),
-      hitQuality,
-    );
-
-    _animationManager.addAccuracyAnimation(
-      Offset(staticHitLineX, _staffTop + 2 * StaffRenderer.SPACE_HEIGHT),
-      hitQuality,
-      0,
-    );
-
-    if (isCorrectPitch && _currentCombo >= 5) {
-      _animationManager.addComboAnimation(
-        Offset(staticHitLineX, _staffTop + 2 * StaffRenderer.SPACE_HEIGHT),
-        _currentCombo,
-      );
-    }
-
-    // Actualizar UI (solo puntuación, no la partitura)
-    setState(() {
-      _scoreVersion++;
+      _scrollController.jumpTo(nextOffset);
     });
   }
 
-  // ============================================================
-  // CÁLCULOS MUSICALES
-  // ============================================================
-
-  String _normalizePitch(String pitch) {
-    var p = pitch.trim().toUpperCase();
-    if (p.isEmpty) return p;
-    p = p.replaceAll('♯', '#').replaceAll('♭', 'B');
-    final match = RegExp(r'^([A-G])([#B]?)(\d)$').firstMatch(p);
-    if (match == null) return p;
-
-    final note = match.group(1)!;
-    final accidental = match.group(2) ?? '';
-    final octave = int.parse(match.group(3)!);
-
-    const semitone = {
-      'C': 0,
-      'D': 2,
-      'E': 4,
-      'F': 5,
-      'G': 7,
-      'A': 9,
-      'B': 11,
-    };
-
-    var value = semitone[note]! + (octave * 12);
-    if (accidental == '#') value += 1;
-    if (accidental == 'B') value -= 1;
-
-    final normalizedOctave = value ~/ 12;
-    final normalizedClass = value % 12;
-    const names = {
-      0: 'C',
-      1: 'C#',
-      2: 'D',
-      3: 'D#',
-      4: 'E',
-      5: 'F',
-      6: 'F#',
-      7: 'G',
-      8: 'G#',
-      9: 'A',
-      10: 'A#',
-      11: 'B',
-    };
-
-    return '${names[normalizedClass]}$normalizedOctave';
+  void _stopAutoScroll() {
+    _autoScrollTimer?.cancel();
+    _autoScrollTimer = null;
+    _lastAutoScrollFrame = null;
   }
 
-  int _ticksPerMeasure(TimeSignature timeSignature) {
-    return (TicksEngine.TPQN * timeSignature.numerator * 4) ~/
-        timeSignature.denominator;
+  // ===== HANDLE NOTE INPUT (DELEGADO) =====
+  void _handleNoteInput(String pitch) {
+    if (_isPlaying && _gameSession != null) {
+      _gameSession!.handleNoteInput(pitch);
+    }
   }
 
-  double _scoreXForTick(MusicScore score, int absoluteTick, double hitLineX) {
-    final baseTick = score.notes.first.absoluteTick;
-    return hitLineX + ((absoluteTick - baseTick) * _pixelsPerTick);
-  }
-
-  _HitWindowFeedback _computeHitWindowFeedback(MusicScore score, double hitLineX) {
-    if (score.notes.isEmpty) {
-      return const _HitWindowFeedback(state: _HitWindowState.none, deltaMs: 0);
-    }
-
-    final scrollOffset =
-        _scrollController.hasClients ? _scrollController.offset : 0.0;
-
-    NoteModel? closestNote;
-    double closestDeltaPx = double.infinity;
-
-    for (final note in score.notes) {
-      final noteScoreX = _scoreXForTick(score, note.absoluteTick, hitLineX);
-      final noteScreenX = noteScoreX - scrollOffset;
-      final deltaPx = noteScreenX - hitLineX;
-
-      if (deltaPx.abs() < closestDeltaPx.abs()) {
-        closestDeltaPx = deltaPx;
-        closestNote = note;
-      }
-    }
-
-    if (closestNote == null) {
-      return const _HitWindowFeedback(state: _HitWindowState.none, deltaMs: 0);
-    }
-
-    final deltaTicks = closestDeltaPx / _pixelsPerTick;
-    final deltaMs =
-        (deltaTicks / TicksEngine.TPQN) * (60000.0 / score.bpm.toDouble());
-    final absMs = deltaMs.abs();
-
-    if (absMs <= 45.0) {
-      return _HitWindowFeedback(
-        state: _HitWindowState.perfect,
-        deltaMs: deltaMs,
-        notePitch: closestNote.pitch,
-      );
-    }
-
-    if (absMs <= 140.0) {
-      return _HitWindowFeedback(
-        state: deltaMs > 0 ? _HitWindowState.early : _HitWindowState.late,
-        deltaMs: deltaMs,
-        notePitch: closestNote.pitch,
-      );
-    }
-
-    return _HitWindowFeedback(
-      state: _HitWindowState.none,
-      deltaMs: deltaMs,
-      notePitch: closestNote.pitch,
-    );
-  }
-
-  double _perfectWindowHalfWidthPx(MusicScore score) {
-    final pixelsPerSecond = (TicksEngine.TPQN * score.bpm / 60.0) * _pixelsPerTick;
-    return pixelsPerSecond * 0.045;
-  }
+  // ===== MÉTODOS AUXILIARES PARA RENDERIZADO =====
+  double get _pixelsPerTick => _basePixelsPerTick * _noteSpacingScale.value;
 
   double _staticHitLineX(MusicScore score, double viewportWidth) {
     if (score.notes.isEmpty) return _leftMargin + 180.0;
-
     final baseHitLineX = _leftMargin + 180.0;
-
     if (viewportWidth <= 0) return baseHitLineX;
-
     final maxHitLineX = math.max(baseHitLineX, viewportWidth * 0.5);
     final t = _musicStartOffsetScale.value.clamp(
       _minMusicStartOffsetScale,
@@ -634,113 +326,31 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
     return baseHitLineX + ((maxHitLineX - baseHitLineX) * t);
   }
 
-  Color _feedbackColor(_HitWindowState state) {
-    switch (state) {
-      case _HitWindowState.perfect:
-        return const Color(0xFF2E7D32);
-      case _HitWindowState.early:
-      case _HitWindowState.late:
-        return const Color(0xFFF9A825);
-      case _HitWindowState.none:
-        return Colors.red;
-    }
-  }
-
-  String _feedbackText(_HitWindowFeedback feedback) {
-    final note = feedback.notePitch ?? '-';
-    final ms = feedback.deltaMs.abs().toStringAsFixed(0);
-
-    switch (feedback.state) {
-      case _HitWindowState.perfect:
-        return 'Perfecto ($note · ${ms}ms)';
-      case _HitWindowState.early:
-        return 'Temprano ($note · +${ms}ms)';
-      case _HitWindowState.late:
-        return 'Tarde ($note · -${ms}ms)';
-      case _HitWindowState.none:
-        return 'En espera ($note · ${ms}ms)';
-    }
-  }
+  
 
   // ============================================================
-  // MÉTODOS DE CARGA DE ARCHIVOS
+  // MÉTODO BUILD (COMPLETO Y REFACTORIZADO)
   // ============================================================
-
-  Future<void> _loadFromAsset() async {
-    setState(() {
-      _isLoading = true;
-      _status = 'Cargando archivo de ejemplo...';
-    });
-
-    try {
-      final xml = await rootBundle.loadString('assets/sample.musicxml');
-      final score = await compute(_parseMusicXmlInBackground, xml);
-      setState(() {
-        _loadedScore = score;
-        _isPlaying = false;
-        _status = '';
-        _isLoading = false;
-      });
-    } catch (e) {
-      setState(() {
-        _status = 'Error al parsear archivo de ejemplo: $e';
-        _isLoading = false;
-      });
-    }
-  }
-
-  Future<void> _pickFile() async {
-    setState(() {
-      _isLoading = true;
-      _status = 'Seleccionando archivo...';
-    });
-
-    try {
-      final result = await FilePicker.pickFiles(
-        type: FileType.custom,
-        allowedExtensions: ['xml', 'musicxml'],
-      );
-
-      if (result == null || result.files.isEmpty) {
-        setState(() {
-          _status = 'No se seleccionó ningún archivo.';
-          _isLoading = false;
-        });
-        return;
-      }
-
-      final path = result.files.single.path;
-      if (path == null) {
-        setState(() {
-          _status = 'Ruta de archivo no disponible.';
-          _isLoading = false;
-        });
-        return;
-      }
-
-      final content = await File(path).readAsString();
-      final score = await compute(_parseMusicXmlInBackground, content);
-
-      setState(() {
-        _loadedScore = score;
-        _isPlaying = false;
-        _status = '';
-        _isLoading = false;
-      });
-    } catch (e) {
-      setState(() {
-        _status = 'Error al cargar archivo: $e';
-        _isLoading = false;
-      });
-    }
-  }
-
-  // ============================================================
-  // BUILD (OPTIMIZADO)
-  // ============================================================
-
   @override
   Widget build(BuildContext context) {
+    final game = _gameSession;
+    // Si no hay sesión o no hay partitura cargada, mostrar carga o mensaje
+    if (_loadedScore == null || game == null) {
+      return Scaffold(
+        appBar: AppBar(
+          elevation: 0,
+          toolbarHeight: 0,
+          automaticallyImplyLeading: false,
+        ),
+        body: const Center(
+          child: Text('Cargue un archivo MusicXML para comenzar.'),
+        ),
+      );
+    }
+
+    final lastHit = game.hitHistory.isNotEmpty ? game.hitHistory.last : null;
+    final beatColor = lastHit != null ? Color(lastHit.colorValue) : Colors.grey;
+
     return Scaffold(
       appBar: AppBar(
         elevation: 0,
@@ -751,7 +361,7 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
         padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
         child: Column(
           children: [
-            // --- Barra de control ---
+            // Fila de botones: Volver (izquierda) y Play (derecha)
             Row(
               children: [
                 IconButton(
@@ -762,27 +372,6 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
                   constraints: const BoxConstraints(),
                 ),
                 const Spacer(),
-                // Puntuación (solo se actualiza cuando cambia)
-                ValueListenableBuilder<int>(
-                  valueListenable: ValueNotifier<int>(_scoreVersion),
-                  builder: (context, version, child) {
-                    return Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.primary.withOpacity(0.15),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(
-                        '⭐ $_currentScore  |  🔥 $_currentCombo',
-                        style: const TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    );
-                  },
-                ),
-                const SizedBox(width: 8),
                 IconButton(
                   onPressed: _isPlaying ? null : _startFromBeginning,
                   icon: Icon(
@@ -798,150 +387,118 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
             ),
             const SizedBox(height: 4),
 
-            // --- Partitura (con RepaintBoundary y ValueListenableBuilder) ---
+            // Partitura (ocupa el espacio restante)
             Expanded(
-              child: RepaintBoundary(
-                key: _repaintKey,
-                child: ValueListenableBuilder<int>(
-                  valueListenable: _frameNotifier,
-                  builder: (context, frame, child) {
-                    return Container(
-                      decoration: BoxDecoration(
-                        color: Colors.white,
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(8),
-                        child: LayoutBuilder(
-                          builder: (context, constraints) {
-                            if (_loadedScore == null) {
-                              return const Center(
-                                child: Text('Cargue un archivo MusicXML'),
-                              );
-                            }
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(8),
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final maxTick = _loadedScore!.getTotalTicks();
+                      final minWidth = constraints.maxWidth;
+                      _currentViewportWidth = constraints.maxWidth;
+                      final calculatedWidth = (maxTick * _pixelsPerTick) + 160;
+                      final width = calculatedWidth < minWidth ? minWidth : calculatedWidth;
 
-                            final maxTick = _loadedScore!.getTotalTicks();
-                            final minWidth = constraints.maxWidth;
-                            _currentViewportWidth = constraints.maxWidth;
-                            final calculatedWidth = (maxTick * _pixelsPerTick) + 160;
-                            final width = calculatedWidth < minWidth ? minWidth : calculatedWidth;
+                      final staticHitLineX = _staticHitLineX(_loadedScore!, _currentViewportWidth);
+                      final perfectWindowHalfWidth = 0.0;
 
-                            final staticHitLineX = _staticHitLineX(_loadedScore!, _currentViewportWidth);
-                            final feedback = _computeHitWindowFeedback(_loadedScore!, staticHitLineX);
-                            final feedbackColor = _feedbackColor(feedback.state);
-                            final perfectWindowHalfWidth = _perfectWindowHalfWidthPx(_loadedScore!);
-
-                            return Stack(
-                              children: [
-                                // --- Partitura ---
-                                Scrollbar(
-                                  controller: _scrollController,
-                                  thumbVisibility: true,
-                                  trackVisibility: true,
-                                  thickness: 8,
-                                  radius: const Radius.circular(6),
-                                  child: SingleChildScrollView(
-                                    controller: _scrollController,
-                                    scrollDirection: Axis.horizontal,
-                                    child: SizedBox(
-                                      width: width,
-                                      child: CustomPaint(
-                                        painter: SMuFLRenderer(
-                                          timeSignature: _loadedScore!.timeSignature,
-                                          keySignature: _loadedScore!.keySignature,
-                                          visibleNotes: _loadedScore!.notes,
-                                          animationManager: _animationManager,
-                                          ticksEngine: TicksEngine(initialBpm: _loadedScore!.bpm),
-                                          pixelsPerTick: _pixelsPerTick,
-                                          hitLineXOverride: staticHitLineX,
-                                          showHitLine: false,
-                                        ),
-                                        child: const SizedBox.expand(),
-                                      ),
-                                    ),
+                      return Stack(
+                        children: [
+                          // Pentagrama con scroll
+                          Scrollbar(
+                            controller: _scrollController,
+                            thumbVisibility: true,
+                            trackVisibility: true,
+                            thickness: 8,
+                            radius: const Radius.circular(6),
+                            child: SingleChildScrollView(
+                              controller: _scrollController,
+                              scrollDirection: Axis.horizontal,
+                              child: SizedBox(
+                                width: width,
+                                child: CustomPaint(
+                                  painter: SMuFLRenderer(
+                                    timeSignature: _loadedScore!.timeSignature,
+                                    keySignature: _loadedScore!.keySignature,
+                                    visibleNotes: _loadedScore!.notes,
+                                    animationManager: _animationManager,
+                                    ticksEngine: TicksEngine(initialBpm: _loadedScore!.bpm),
+                                    pixelsPerTick: _pixelsPerTick,
+                                    hitLineXOverride: staticHitLineX,
+                                    showHitLine: false,
                                   ),
+                                  child: const SizedBox.expand(),
                                 ),
-
-                                // --- Línea de Beat ---
-                                IgnorePointer(
-                                  child: CustomPaint(
-                                    painter: _StaticBeatLinePainter(
-                                      hitLineX: staticHitLineX,
-                                      staffTop: _staffTop,
-                                      beatColor: feedbackColor,
-                                      perfectWindowHalfWidth: perfectWindowHalfWidth,
-                                    ),
-                                    child: const SizedBox.expand(),
+                              ),
+                            ),
+                          ),
+                          // Línea de beat con color dinámico
+                          IgnorePointer(
+                            child: CustomPaint(
+                              painter: _StaticBeatLinePainter(
+                                hitLineX: staticHitLineX,
+                                staffTop: _staffTop,
+                                beatColor: beatColor,
+                                perfectWindowHalfWidth: perfectWindowHalfWidth,
+                              ),
+                              child: const SizedBox.expand(),
+                            ),
+                          ),
+                          // Feedback mínimo en la esquina superior derecha
+                          Positioned(
+                            top: 4,
+                            right: 4,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: beatColor.withOpacity(0.15),
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(color: beatColor.withOpacity(0.5), width: 1),
+                              ),
+                              child: Text(
+                                lastHit?.displayName ?? 'Esperando...',
+                                style: TextStyle(
+                                  color: beatColor,
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 10,
+                                ),
+                              ),
+                            ),
+                          ),
+                          // Historial de hits (círculos pequeños)
+                          Positioned(
+                            top: 32,
+                            left: 4,
+                            right: 4,
+                            child: Wrap(
+                              spacing: 3,
+                              children: game.hitHistory.map((quality) {
+                                return Container(
+                                  width: 10,
+                                  height: 10,
+                                  decoration: BoxDecoration(
+                                    color: Color(quality.colorValue),
+                                    shape: BoxShape.circle,
                                   ),
-                                ),
-
-                                // --- Feedback de precisión ---
-                                Positioned(
-                                  top: 4,
-                                  right: 4,
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: feedbackColor.withOpacity(0.15),
-                                      borderRadius: BorderRadius.circular(6),
-                                      border: Border.all(color: feedbackColor.withOpacity(0.5), width: 1),
-                                    ),
-                                    child: Text(
-                                      _feedbackText(feedback),
-                                      style: TextStyle(
-                                        color: feedbackColor,
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 10,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-
-                                // --- Historial de hits ---
-                                Positioned(
-                                  top: 32,
-                                  left: 4,
-                                  right: 4,
-                                  child: Wrap(
-                                    spacing: 3,
-                                    children: _hitHistory.map((state) {
-                                      Color hitColor;
-                                      switch (state) {
-                                        case _HitWindowState.perfect:
-                                          hitColor = const Color(0xFF2E7D32);
-                                          break;
-                                        case _HitWindowState.early:
-                                        case _HitWindowState.late:
-                                          hitColor = const Color(0xFFF9A825);
-                                          break;
-                                        case _HitWindowState.none:
-                                          hitColor = Colors.red;
-                                          break;
-                                      }
-                                      return Container(
-                                        width: 10,
-                                        height: 10,
-                                        decoration: BoxDecoration(
-                                          color: hitColor,
-                                          shape: BoxShape.circle,
-                                        ),
-                                      );
-                                    }).toList(),
-                                  ),
-                                ),
-                              ],
-                            );
-                          },
-                        ),
-                      ),
-                    );
-                  },
+                                );
+                              }).toList(),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
                 ),
               ),
             ),
             const SizedBox(height: 4),
 
-            // --- Piano ---
+            // Piano
             SizedBox(
               height: 120,
               child: _PianoInput(
@@ -956,45 +513,20 @@ class _GameScreenState extends State<GameScreen> with SingleTickerProviderStateM
   }
 
   // ============================================================
-  // MÉTODOS AUXILIARES
+  // DISPOSE Y OTROS MÉTODOS DE CICLO DE VIDA
   // ============================================================
-
-  Widget _buildInfoChip(String label, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withOpacity(0.2),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withOpacity(0.3)),
-      ),
-      child: Text(
-        label,
-        style: TextStyle(
-          fontSize: 11,
-          color: color,
-          fontWeight: FontWeight.w500,
-        ),
-      ),
-    );
-  }
-
-  String _getDifficultyLabel(Difficulty difficulty) {
-    switch (difficulty) {
-      case Difficulty.beginner:
-        return 'Principiante';
-      case Difficulty.intermediate:
-        return 'Intermedio';
-      case Difficulty.advanced:
-        return 'Avanzado';
-      case Difficulty.expert:
-        return 'Experto';
-    }
+  @override
+  void dispose() {
+    _stopAutoScroll();
+    _repaintController.dispose();
+    _scrollController.dispose();
+    _pianoAudioService.dispose();
+    _gameSession?.stop();
+    super.dispose();
   }
 }
 
-// ============================================================
-// PIANO INPUT
-// ============================================================
+
 
 class _PianoInput extends StatelessWidget {
   final bool enabled;
@@ -1181,23 +713,11 @@ class _PianoInput extends StatelessWidget {
   }
 }
 
-// ============================================================
-// PAINTER DE LÍNEA DE BEAT
-// ============================================================
-
 class _StaticBeatLinePainter extends CustomPainter {
   final double hitLineX;
   final double staffTop;
   final Color beatColor;
   final double perfectWindowHalfWidth;
-
-  // Pinceles estáticos (optimización)
-  static final Paint _windowPaint = Paint()
-    ..style = PaintingStyle.fill;
-
-  static final Paint _linePaint = Paint()
-    ..strokeWidth = 3.0
-    ..style = PaintingStyle.stroke;
 
   const _StaticBeatLinePainter({
     required this.hitLineX,
@@ -1210,27 +730,25 @@ class _StaticBeatLinePainter extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (size.width == 0 || size.height == 0) return;
 
-    // Ventana de perfect
-    _windowPaint.color = beatColor.withOpacity(0.12);
+    final windowRect = Rect.fromLTRB(
+      hitLineX - perfectWindowHalfWidth,
+      staffTop,
+      hitLineX + perfectWindowHalfWidth,
+      staffTop + 4 * StaffRenderer.SPACE_HEIGHT,
+    );
     canvas.drawRect(
-      Rect.fromLTRB(
-        hitLineX - perfectWindowHalfWidth,
-        staffTop,
-        hitLineX + perfectWindowHalfWidth,
-        staffTop + 4 * StaffRenderer.SPACE_HEIGHT,
-      ),
-      _windowPaint,
+      windowRect,
+      Paint()..color = beatColor.withOpacity(0.12),
     );
 
-    // Línea roja
-    _linePaint.color = beatColor.withOpacity(0.9);
     canvas.drawLine(
       Offset(hitLineX, staffTop),
       Offset(hitLineX, staffTop + 4 * StaffRenderer.SPACE_HEIGHT),
-      _linePaint,
+      Paint()
+        ..color = beatColor.withOpacity(0.9)
+        ..strokeWidth = 3.0,
     );
 
-    // Etiqueta "BEAT" (solo se crea una vez)
     final textPainter = TextPainter(
       text: TextSpan(
         text: 'BEAT',
@@ -1258,10 +776,7 @@ class _StaticBeatLinePainter extends CustomPainter {
   }
 }
 
-// ============================================================
-// SETTINGS SCREEN
-// ============================================================
-
+/// Pantalla de configuración
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({Key? key}) : super(key: key);
 
@@ -1283,7 +798,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Configuración')),
+      appBar: AppBar(
+        title: const Text('Configuración'),
+      ),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(20),
@@ -1312,7 +829,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       value: _spacingScale,
                       label: '${(_spacingScale * 100).round()}%',
                       onChanged: (value) {
-                        setState(() => _spacingScale = value);
+                        setState(() {
+                          _spacingScale = value;
+                        });
                         _noteSpacingScale.value = value;
                       },
                     ),
@@ -1349,7 +868,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       value: _startOffsetScale,
                       label: '${(_startOffsetScale * 100).round()}%',
                       onChanged: (value) {
-                        setState(() => _startOffsetScale = value);
+                        setState(() {
+                          _startOffsetScale = value;
+                        });
                         _musicStartOffsetScale.value = value;
                       },
                     ),
@@ -1374,10 +895,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   }
 }
 
-// ============================================================
-// LEVEL SELECT SCREEN
-// ============================================================
-
+/// Pantalla de selección de niveles (archivos MusicXML precargados)
 class LevelSelectScreen extends StatefulWidget {
   const LevelSelectScreen({Key? key}) : super(key: key);
 
@@ -1402,6 +920,7 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
       if (discoveredFiles.isNotEmpty) {
         return discoveredFiles;
       }
+
       return await _loadLevelsFromAssets();
     } catch (e) {
       return await _loadLevelsFromAssets();
@@ -1410,7 +929,8 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
 
   Future<List<PreloadedMusicXmlFile>> _loadLevelsFromAssets() async {
     try {
-      final manifestJson = await rootBundle.loadString('AssetManifest.json');
+      final manifestJson =
+          await rootBundle.loadString('AssetManifest.json');
       final manifest = jsonDecode(manifestJson) as Map<String, dynamic>;
 
       final musicxmlFiles = manifest.keys
@@ -1424,7 +944,10 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
       return musicxmlFiles
           .map((path) {
             final fileName = path.split('/').last;
-            return PreloadedMusicXmlFile(name: fileName, path: path);
+            return PreloadedMusicXmlFile(
+              name: fileName,
+              path: path,
+            );
           })
           .toList();
     } catch (e) {
@@ -1435,7 +958,9 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Seleccionar Nivel')),
+      appBar: AppBar(
+        title: const Text('Seleccionar Nivel'),
+      ),
       body: FutureBuilder<List<PreloadedMusicXmlFile>>(
         future: _filesFuture,
         builder: (context, snapshot) {
@@ -1485,7 +1010,9 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
                   const SizedBox(height: 32),
                   ElevatedButton.icon(
                     onPressed: () {
-                      setState(() => _filesFuture = _loadAvailableLevels());
+                      setState(() {
+                        _filesFuture = _loadAvailableLevels();
+                      });
                     },
                     icon: const Icon(Icons.refresh),
                     label: const Text('Reintentar'),
@@ -1508,17 +1035,24 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
                   itemBuilder: (context, index) {
                     final file = files[index];
                     return Card(
-                      margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      margin:
+                          const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                       child: ListTile(
                         selected: _selectedFile == file,
-                        selectedTileColor:
-                            Theme.of(context).colorScheme.primary.withOpacity(0.14),
+                        selectedTileColor: Theme.of(context)
+                            .colorScheme
+                            .primary
+                            .withOpacity(0.14),
                         leading: const Icon(Icons.music_note),
                         title: Text(file.name),
                         trailing: _selectedFile == file
                             ? const Icon(Icons.check_circle, color: Colors.green)
                             : null,
-                        onTap: () => setState(() => _selectedFile = file),
+                        onTap: () {
+                          setState(() {
+                            _selectedFile = file;
+                          });
+                        },
                       ),
                     );
                   },
@@ -1571,7 +1105,10 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
                               } catch (e) {
                                 if (!mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(content: Text('Error al iniciar nivel: $e')),
+                                  SnackBar(
+                                    content:
+                                        Text('Error al iniciar nivel: $e'),
+                                  ),
                                 );
                               }
                             },
@@ -1587,10 +1124,7 @@ class _LevelSelectScreenState extends State<LevelSelectScreen> {
   }
 }
 
-// ============================================================
-// RESULTS SCREEN
-// ============================================================
-
+/// Pantalla de resultados
 class ResultsScreen extends StatelessWidget {
   final String summary;
   final Exercise? exercise;
@@ -1604,7 +1138,9 @@ class ResultsScreen extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Resultados')),
+      appBar: AppBar(
+        title: const Text('Resultados'),
+      ),
       body: Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -1634,9 +1170,10 @@ class ResultsScreen extends StatelessWidget {
 }
 
 // ============================================================
-// EXERCISE SELECTION SCREEN
+// Pantalla de selección de ejercicios (añadir al final de screens.dart)
 // ============================================================
 
+/// Pantalla para seleccionar ejercicios precargados
 class ExerciseSelectionScreen extends StatefulWidget {
   const ExerciseSelectionScreen({Key? key}) : super(key: key);
 
@@ -1656,7 +1193,10 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 4, vsync: this);
+    _tabController = TabController(
+      length: 4,
+      vsync: this,
+    );
     _tabController.addListener(_onTabChanged);
     _updateFilteredExercises();
   }
@@ -1694,7 +1234,9 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
       exercises = exercises.where((e) => e.type == _selectedType).toList();
     }
 
-    setState(() => _filteredExercises = exercises);
+    setState(() {
+      _filteredExercises = exercises;
+    });
   }
 
   @override
@@ -1740,7 +1282,8 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      const Icon(Icons.error_outline, size: 48, color: Colors.red),
+                      const Icon(Icons.error_outline,
+                          size: 48, color: Colors.red),
                       const SizedBox(height: 16),
                       Text(provider.error!),
                       const SizedBox(height: 16),
@@ -1756,7 +1299,8 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          const Icon(Icons.search_off, size: 48, color: Colors.grey),
+                          const Icon(Icons.search_off,
+                              size: 48, color: Colors.grey),
                           const SizedBox(height: 16),
                           Text(
                             _searchQuery.isNotEmpty
@@ -1776,13 +1320,18 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
                     )
                   : _buildExerciseList(context),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _showStatsDialog(context, provider.getStats()),
+        onPressed: () {
+          _showStatsDialog(context, provider.getStats());
+        },
         icon: const Icon(Icons.insights),
         label: const Text('Estadísticas'),
       ),
     );
   }
 
+  // ------------------------------------------------------------
+  // Métodos auxiliares (copia los que ya tenías)
+  // ------------------------------------------------------------
   Widget _buildExerciseList(BuildContext context) {
     return ListView.builder(
       padding: const EdgeInsets.all(8),
@@ -1800,7 +1349,9 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       elevation: 2,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
         onTap: () {
@@ -1841,7 +1392,8 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
                           ),
                         ),
                         if (exercise.isFavorite)
-                          const Icon(Icons.favorite, color: Colors.red, size: 16),
+                          const Icon(Icons.favorite,
+                              color: Colors.red, size: 16),
                       ],
                     ),
                     const SizedBox(height: 4),

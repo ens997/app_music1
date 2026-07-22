@@ -28,6 +28,12 @@ void main() {
       ];
     });
 
+    Finder findRendererPaint(SMuFLRenderer renderer) {
+      return find.byWidgetPredicate(
+        (widget) => widget is CustomPaint && widget.painter == renderer,
+      );
+    }
+
     testWidgets('SMuFLRenderer renders without errors', (WidgetTester tester) async {
       final renderer = SMuFLRenderer(
         animationManager: animationManager,
@@ -130,7 +136,7 @@ void main() {
         ),
       );
 
-      expect(find.byType(CustomPaint), findsOneWidget);
+      expect(findRendererPaint(renderer), findsOneWidget);
 
       // Verify animations were added
       expect(animationManager.feedbackAnimations.length, 1);
@@ -160,7 +166,7 @@ void main() {
           ),
         );
 
-        expect(find.byType(CustomPaint), findsOneWidget);
+        expect(findRendererPaint(renderer), findsOneWidget);
       }
     });
 
@@ -189,7 +195,7 @@ void main() {
         ),
       );
 
-      expect(find.byType(CustomPaint), findsOneWidget);
+      expect(findRendererPaint(renderer), findsOneWidget);
       expect(renderer.ticksEngine, ticksEngine);
       expect(renderer.timeSignature, timeSignature);
       expect(renderer.visibleNotes, testNotes);

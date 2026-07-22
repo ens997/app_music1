@@ -144,7 +144,7 @@ class MusicXMLParser {
           }
 
           // Calcular ticks en TPQN=480
-          final ticksPerDivision = (TicksEngine.TPQN / divisions);
+          final ticksPerDivision = (TicksEngine.tpnq / divisions);
           final durationTicks = (durationDivisions * ticksPerDivision).round();
 
           // Nombre pitch completo
@@ -208,7 +208,7 @@ class MusicXMLParser {
         return NoteDuration.sixteenth;
       default:
         // Fallback por duración relativa usando divisiones
-        final ticksPerDivision = (TicksEngine.TPQN / divisions);
+        final ticksPerDivision = (TicksEngine.tpnq / divisions);
         final ticks = durationDivisions * ticksPerDivision;
         if (ticks >= NoteDuration.whole.getTicksAtTPQN480()) return NoteDuration.whole;
         if (ticks >= NoteDuration.half.getTicksAtTPQN480()) return NoteDuration.half;

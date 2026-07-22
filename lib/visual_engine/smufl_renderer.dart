@@ -237,9 +237,9 @@ class SMuFLRenderer extends CustomPainter {
 
   int _ticksPerMeasure() {
     if (timeSignature == null) {
-      return TicksEngine.TPQN * 4;
+      return TicksEngine.tpnq * 4;
     }
-    return (TicksEngine.TPQN * timeSignature!.numerator * 4) ~/
+    return (TicksEngine.tpnq * timeSignature!.numerator * 4) ~/
         timeSignature!.denominator;
   }
 

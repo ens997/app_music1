@@ -3,7 +3,7 @@ import '../models/models.dart';
 /// Motor temporal basado en TPQN (Ticks Per Quarter Note)
 /// Maneja toda la lógica de timing musical basada en ticks
 class TicksEngine {
-  static const int TPQN = 480; // Ticks Per Quarter Note (estándar MIDI)
+  static const int tpnq = 480; // Ticks Per Quarter Note (estándar MIDI)
 
   int _bpm = 120;
   late Stopwatch _timer;
@@ -52,13 +52,13 @@ class TicksEngine {
 
   /// Convierte ticks a millisegundos
   double ticksToMilliseconds(int ticks) {
-    return (ticks / TPQN) * getQuarterNoteDuration();
+    return (ticks / tpnq) * getQuarterNoteDuration();
   }
 
   /// Convierte millisegundos a ticks
   int millisecondsToTicks(double ms) {
     final quarterNoteDuration = getQuarterNoteDuration();
-    return (ms * TPQN / quarterNoteDuration).toInt();
+    return (ms * tpnq / quarterNoteDuration).toInt();
   }
 
   /// Obtiene duración de una nota en ticks
