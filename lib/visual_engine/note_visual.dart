@@ -3,9 +3,7 @@ import '../core/core.dart';
 import 'bravura_glyphs.dart';
 import 'staff_renderer.dart';
 
-/// Maneja el rendering de notas musicales individuales.
 class NoteVisual {
-  // Mapeo de notas naturales a posiciones verticales en clave de Sol.
   static const Map<String, int> notePositions = {
     'G3': 14,
     'A3': 13,
@@ -28,7 +26,6 @@ class NoteVisual {
     'D6': -5,
   };
 
-  // --- PINCELES ESTÁTICOS (reutilizables) ---
   static final Paint _stemPaint = Paint()
     ..color = Colors.black
     ..strokeWidth = 2.0
@@ -43,39 +40,27 @@ class NoteVisual {
     ..strokeWidth = StaffRenderer.STAFF_LINE_WIDTH
     ..style = PaintingStyle.stroke;
 
-  // --- TextPainter reutilizable para etiquetas de notas ---
   static final TextPainter _labelPainter = TextPainter(
     textDirection: TextDirection.ltr,
   );
 
-  void renderNote(
-    Canvas canvas,
-    NoteModel note,
-    Offset position,
-    ClefType clefType,
-  ) {
-    drawNote(canvas, note, position, Colors.black);
-  }
-
   static void drawNote(
     Canvas canvas,
     NoteModel note,
-    Offset staffTop,
+    Offset headPosition,
+    double staffTop,
     Color color,
   ) {
     if (note.isRest) {
-      _drawRest(canvas, note, staffTop, color);
+      _drawRest(canvas, note, headPosition.dx, staffTop, color);
       return;
     }
 
-    final noteKey = basePitchKey(note.pitch);
-    final position = notePositions[noteKey];
-    if (position == null) return;
+    final staffPosition = notePositions[basePitchKey(note.pitch)] ?? 5;
+    final headX = headPosition.dx;
+    final headY = headPosition.dy;
 
-    final noteY = StaffRenderer.getNoteYPosition(staffTop.dy, position);
-    final noteX = staffTop.dx;
-
-    _drawLedgerLines(canvas, noteX, staffTop.dy, position);
+    _drawLedgerLines(canvas, headX, staffTop, staffPosition);
 
     var fillColor = color;
     if (note.isHit) {
@@ -84,24 +69,27 @@ class NoteVisual {
       fillColor = const Color(0xFFe94560);
     }
 
-    _drawNoteHead(canvas, Offset(noteX, noteY), note.duration, fillColor);
+    // 4 argumentos: canvas, Offset, NoteDuration, Color
+    _drawNoteHead(canvas, Offset(headX, headY), note.duration, fillColor);
+    
     if (note.isDotted && _supportsAugmentationDot(note.duration)) {
-      _drawAugmentationDot(canvas, Offset(noteX, noteY), fillColor);
+      _drawAugmentationDot(canvas, Offset(headX, headY), fillColor);
     }
+    
     _drawStem(
       canvas,
-      Offset(noteX, noteY),
+      Offset(headX, headY),
       note.duration,
       fillColor,
-      position,
+      staffPosition,
       note.beamType,
     );
 
     if (note.displayAccidental) {
-      _drawAccidental(canvas, Offset(noteX, noteY), note.accidental);
+      _drawAccidental(canvas, Offset(headX, headY), note.accidental);
     }
 
-    _drawNoteLabel(canvas, Offset(noteX, noteY - 45), note);
+    _drawNoteLabel(canvas, Offset(headX, headY - 45), note);
   }
 
   static String basePitchKey(String pitch) {
@@ -169,7 +157,6 @@ class NoteVisual {
     if (duration == NoteDuration.whole) return;
     if (beamType.isBeamed) return;
 
-    // Reutilizar pincel, solo cambiar color si es necesario
     if (_stemPaint.color != color) {
       _stemPaint.color = color;
     }
@@ -270,7 +257,6 @@ class NoteVisual {
       position.dy - StaffRenderer.SPACE_HEIGHT * 0.03,
     );
 
-    // Reutilizar pincel
     if (_dotPaint.color != color) {
       _dotPaint.color = color;
     }
@@ -321,11 +307,11 @@ class NoteVisual {
   static void _drawRest(
     Canvas canvas,
     NoteModel note,
-    Offset staffTop,
+    double x,
+    double staffTop,
     Color color,
   ) {
-    final restY = StaffRenderer.getNoteYPosition(staffTop.dy, 5);
-    final restX = staffTop.dx;
+    final restY = StaffRenderer.getNoteYPosition(staffTop, 5);
     final glyph = BravuraGlyphs.rest(note.duration);
     final fontSize = switch (note.duration) {
       NoteDuration.whole => 34.0,
@@ -338,7 +324,7 @@ class NoteVisual {
     BravuraGlyphs.paintCentered(
       canvas,
       glyph: glyph,
-      center: Offset(restX, restY),
+      center: Offset(x, restY),
       fontSize: fontSize,
       color: color,
       offset: const Offset(0, -2),

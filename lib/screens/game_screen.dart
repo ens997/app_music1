@@ -1,4 +1,3 @@
-// lib/screens/game_screen.dart
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
@@ -14,6 +13,7 @@ import '../game/game.dart';
 import '../parsers/musicxml_parser.dart';
 import '../providers/exercise_provider.dart';
 import '../visual_engine/visual_engine.dart';
+import '../visual_engine/note_layout.dart';
 
 class GameScreen extends StatefulWidget {
   final String? preloadedFilePath;
@@ -39,7 +39,7 @@ class _GameScreenState extends State<GameScreen>
   final PianoAudioService _pianoAudioService = PianoAudioService();
   static const double _basePixelsPerTick = 0.35;
   static const Duration _autoScrollInterval = Duration(milliseconds: 16);
-  static const double _staffTop = 60;
+  static const double _staffTop = SMuFLRenderer.compactStaffTop;
   static const double _leftMargin = 80;
 
   late final AnimationController _repaintController;
@@ -53,6 +53,15 @@ class _GameScreenState extends State<GameScreen>
   bool _isLoading = false;
   String _status = 'Cargue un archivo MusicXML para comenzar.';
   double _currentViewportWidth = 0.0;
+
+  // --- ValueNotifier para los layouts precalculados ---
+  final ValueNotifier<List<NoteLayout>> _noteLayoutsNotifier =
+      ValueNotifier<List<NoteLayout>>([]);
+
+  // Variables de caché para saber si debemos recalcular
+  double _cachedHitLineX = 0.0;
+  double _cachedPixelsPerTick = _basePixelsPerTick;
+  bool _layoutsDirty = true;
 
   @override
   void initState() {
@@ -76,7 +85,10 @@ class _GameScreenState extends State<GameScreen>
     }
   }
 
-  // ===== MÉTODOS DE CARGA =====
+  // ============================================================
+  // MÉTODOS DE CARGA
+  // ============================================================
+
   Future<void> _loadPreloadedContent(String content) async {
     setState(() {
       _isLoading = true;
@@ -103,7 +115,9 @@ class _GameScreenState extends State<GameScreen>
           if (widget.exercise != null) {
             _status = '🎵 ${widget.exercise!.title} - ${widget.exercise!.composer}';
           }
+          _layoutsDirty = true;
         });
+        _updateNoteLayouts();
       }
     } catch (e) {
       if (mounted) setState(() => _status = 'Error al cargar archivo: $e');
@@ -136,7 +150,9 @@ class _GameScreenState extends State<GameScreen>
           _gameSession!.onScoreChange(() {
             if (mounted) setState(() {});
           });
+          _layoutsDirty = true;
         });
+        _updateNoteLayouts();
       }
     } catch (e) {
       if (mounted) setState(() => _status = 'Error al cargar archivo: $e');
@@ -154,7 +170,54 @@ class _GameScreenState extends State<GameScreen>
     }
   }
 
-  // ===== MÉTODOS DE CONTROL DEL JUEGO =====
+  // ============================================================
+  // PRECÁLCULO DE LAYOUTS DE NOTAS (FUNCIÓN CORREGIDA)
+  // ============================================================
+
+  void _updateNoteLayouts() {
+    final score = _loadedScore;
+    if (score == null) return;
+
+    final hitLineX = _computeHitLineX();
+    final pixelsPerTick = _pixelsPerTick;
+
+    // Solo recalcular si algo cambió
+    if (!_layoutsDirty &&
+        hitLineX == _cachedHitLineX &&
+        pixelsPerTick == _cachedPixelsPerTick) {
+      return;
+    }
+
+    final baseTick = score.notes.isNotEmpty ? score.notes.first.absoluteTick : 0;
+    final layouts = <NoteLayout>[];
+
+    for (final note in score.notes) {
+      final x = hitLineX + ((note.absoluteTick - baseTick) * pixelsPerTick);
+      final staffPosition = NoteVisual.notePositions[NoteVisual.basePitchKey(note.pitch)] ?? 5;
+      final y = StaffRenderer.getNoteYPosition(_staffTop, staffPosition);
+      layouts.add(NoteLayout(note, Offset(x, y)));
+    }
+
+    _noteLayoutsNotifier.value = layouts;
+    _cachedHitLineX = hitLineX;
+    _cachedPixelsPerTick = pixelsPerTick;
+    _layoutsDirty = false;
+  }
+
+  double _computeHitLineX() {
+    const double baseHitLineX = _leftMargin + 180.0;
+    if (_currentViewportWidth <= 0) return baseHitLineX;
+    final maxHitLineX = math.max(baseHitLineX, _currentViewportWidth * 0.5);
+    final t = musicStartOffsetScale.value.clamp(0.0, 1.0);
+    return baseHitLineX + ((maxHitLineX - baseHitLineX) * t);
+  }
+
+  double get _pixelsPerTick => _basePixelsPerTick * noteSpacingScale.value;
+
+  // ============================================================
+  // MÉTODOS DE CONTROL DEL JUEGO
+  // ============================================================
+
   void _startFromBeginning() {
     if (_gameSession == null) return;
     _gameSession!.restart();
@@ -247,7 +310,10 @@ class _GameScreenState extends State<GameScreen>
     );
   }
 
-  // ===== SCROLL AUTOMÁTICO =====
+  // ============================================================
+  // SCROLL AUTOMÁTICO
+  // ============================================================
+
   void _startAutoScrollForLoadedScore() {
     final score = _loadedScore;
     if (score == null) return;
@@ -290,28 +356,20 @@ class _GameScreenState extends State<GameScreen>
     _lastAutoScrollFrame = null;
   }
 
-  // ===== HANDLE NOTE INPUT =====
+  // ============================================================
+  // HANDLE NOTE INPUT
+  // ============================================================
+
   void _handleNoteInput(String pitch) {
     if (_isPlaying && _gameSession != null) {
       _gameSession!.handleNoteInput(pitch);
     }
   }
 
-  // ===== MÉTODOS AUXILIARES PARA RENDERIZADO =====
-  double get _pixelsPerTick => _basePixelsPerTick * noteSpacingScale.value;
-
-  double _staticHitLineX(MusicScore score, double viewportWidth) {
-    if (score.notes.isEmpty) return _leftMargin + 180.0;
-    final baseHitLineX = _leftMargin + 180.0;
-    if (viewportWidth <= 0) return baseHitLineX;
-    final maxHitLineX = math.max(baseHitLineX, viewportWidth * 0.5);
-    final t = musicStartOffsetScale.value.clamp(0.0, 1.0);
-    return baseHitLineX + ((maxHitLineX - baseHitLineX) * t);
-  }
-
   // ============================================================
   // MÉTODO BUILD
   // ============================================================
+
   @override
   Widget build(BuildContext context) {
     final game = _gameSession;
@@ -328,8 +386,14 @@ class _GameScreenState extends State<GameScreen>
       );
     }
 
+    // Actualizar layouts si es necesario (cuando cambian escalas)
+    _updateNoteLayouts();
+
     final lastHit = game.hitHistory.isNotEmpty ? game.hitHistory.last : null;
     final beatColor = lastHit != null ? Color(lastHit.colorValue) : Colors.grey;
+
+    // Recalcular hitLineX para este frame (se pasa al renderer)
+    final hitLineX = _computeHitLineX();
 
     return Scaffold(
       appBar: AppBar(
@@ -367,7 +431,7 @@ class _GameScreenState extends State<GameScreen>
             ),
             const SizedBox(height: 4),
 
-            // Partitura
+            // Partitura optimizada con ValueListenableBuilder
             Expanded(
               child: Container(
                 decoration: BoxDecoration(
@@ -380,16 +444,18 @@ class _GameScreenState extends State<GameScreen>
                     builder: (context, constraints) {
                       final maxTick = _loadedScore!.getTotalTicks();
                       final minWidth = constraints.maxWidth;
-                      _currentViewportWidth = constraints.maxWidth;
+                      final newViewportWidth = constraints.maxWidth;
+                      if (newViewportWidth != _currentViewportWidth) {
+                        _currentViewportWidth = newViewportWidth;
+                        _layoutsDirty = true;
+                        _updateNoteLayouts();
+                      }
                       final calculatedWidth = (maxTick * _pixelsPerTick) + 160;
                       final width = calculatedWidth < minWidth ? minWidth : calculatedWidth;
 
-                      final staticHitLineX = _staticHitLineX(_loadedScore!, _currentViewportWidth);
-                      final perfectWindowHalfWidth = 0.0;
-
                       return Stack(
                         children: [
-                          // Pentagrama con scroll
+                          // Pentagrama con scroll y ValueListenableBuilder
                           Scrollbar(
                             controller: _scrollController,
                             thumbVisibility: true,
@@ -401,18 +467,27 @@ class _GameScreenState extends State<GameScreen>
                               scrollDirection: Axis.horizontal,
                               child: SizedBox(
                                 width: width,
-                                child: CustomPaint(
-                                  painter: SMuFLRenderer(
-                                    timeSignature: _loadedScore!.timeSignature,
-                                    keySignature: _loadedScore!.keySignature,
-                                    visibleNotes: _loadedScore!.notes,
-                                    animationManager: _animationManager,
-                                    ticksEngine: TicksEngine(initialBpm: _loadedScore!.bpm),
-                                    pixelsPerTick: _pixelsPerTick,
-                                    hitLineXOverride: staticHitLineX,
-                                    showHitLine: false,
-                                  ),
-                                  child: const SizedBox.expand(),
+                                child: ValueListenableBuilder<List<NoteLayout>>(
+                                  valueListenable: _noteLayoutsNotifier,
+                                  builder: (context, layouts, child) {
+                                    return RepaintBoundary(
+                                      child: CustomPaint(
+                                        painter: SMuFLRenderer(
+                                          timeSignature: _loadedScore!.timeSignature,
+                                          keySignature: _loadedScore!.keySignature,
+                                          noteLayouts: layouts,
+                                          animationManager: _animationManager,
+                                          hitLineXOverride: hitLineX,
+                                          showHitLine: false,
+                                          clefType: ClefType.treble,
+                                          showTimeSignature: true,
+                                          showKeySignature: true,
+                                          showBarLines: true,
+                                        ),
+                                        child: const SizedBox.expand(),
+                                      ),
+                                    );
+                                  },
                                 ),
                               ),
                             ),
@@ -474,6 +549,7 @@ class _GameScreenState extends State<GameScreen>
     _scrollController.dispose();
     _pianoAudioService.dispose();
     _gameSession?.stop();
+    _noteLayoutsNotifier.dispose();
     super.dispose();
   }
 }

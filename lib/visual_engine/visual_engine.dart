@@ -5,4 +5,5 @@ export 'smufl_renderer.dart';
 export 'staff_renderer.dart';
 export 'note_visual.dart';
 export 'animation_manager.dart';
-export 'widgets/widgets.dart';  // <-- Agregar esta línea
+export 'widgets/widgets.dart';  
+export 'note_layout.dart';
