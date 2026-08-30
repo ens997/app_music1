@@ -92,6 +92,7 @@ class MusicXMLParser {
           String pitchName = 'C';
           int octave = 4;
           Accidental accidental = Accidental.natural;
+          bool displayAccidental = false;
 
           if (!isRest) {
             final pitch = note.getElement('pitch');
@@ -101,6 +102,7 @@ class MusicXMLParser {
 
               final alterText = pitch.getElement('alter')?.text;
               if (alterText != null) {
+                displayAccidental = true;
                 final alter = int.tryParse(alterText) ?? 0;
                 if (alter == 1) {
                   accidental = Accidental.sharp;
@@ -113,6 +115,12 @@ class MusicXMLParser {
                 }
               }
             }
+
+            final accidentalText = note.getElement('accidental')?.text.trim().toLowerCase();
+            if (accidentalText != null && accidentalText.isNotEmpty) {
+              displayAccidental = true;
+              accidental = _accidentalFromMusicXml(accidentalText);
+            }
           }
 
           // Duración en divisions
@@ -121,26 +129,26 @@ class MusicXMLParser {
 
           final typeText = note.getElement('type')?.text.trim().toLowerCase();
           final durationEnum = _durationFromType(typeText, durationDivisions, divisions);
+          final isDotted = note.getElement('dot') != null;
 
-          // Leer información de barras (beams)
+          // Leer todos los niveles de barras. MusicXML usa number="1" para
+          // la barra principal y number="2" para la barra de semicorcheas.
           BeamType beamType = BeamType.none;
-          final beamElements = note.findElements('beam');
-          if (beamElements.isNotEmpty) {
-            // Tomar el primer beam (puede haber múltiples para semicorcheas)
-            final beamText = beamElements.first.text.trim().toLowerCase();
-            switch (beamText) {
-              case 'begin':
-                beamType = BeamType.begin;
-                break;
-              case 'continue':
-                beamType = BeamType.continuation;
-                break;
-              case 'end':
-                beamType = BeamType.end;
-                break;
-              default:
-                beamType = BeamType.none;
-            }
+          final beamLevels = <int, BeamType>{};
+          for (final beamElement in note.findElements('beam')) {
+            final level = int.tryParse(beamElement.getAttribute('number') ?? '1') ?? 1;
+            final beamText = beamElement.text.trim().toLowerCase();
+            final parsedBeamType = switch (beamText) {
+              'begin' => BeamType.begin,
+              'continue' => BeamType.continuation,
+              'end' => BeamType.end,
+              'forward hook' => BeamType.forwardHook,
+              'backward hook' => BeamType.backwardHook,
+              _ => BeamType.none,
+            };
+
+            beamLevels[level] = parsedBeamType;
+            if (level == 1) beamType = parsedBeamType;
           }
 
           // Calcular ticks en TPQN=480
@@ -153,11 +161,15 @@ class MusicXMLParser {
           final noteModel = NoteModel(
             pitch: pitchFull,
             duration: durationEnum,
+            durationTicksOverride: durationTicks,
             absoluteTick: absoluteTick,
             accidental: accidental,
             isRest: isRest,
+            isDotted: isDotted,
+            displayAccidental: displayAccidental,
             velocity: 64,
             beamType: beamType,
+            beamLevels: beamLevels,
           );
 
           notes.add(noteModel);
@@ -215,6 +227,23 @@ class MusicXMLParser {
         if (ticks >= NoteDuration.quarter.getTicksAtTPQN480()) return NoteDuration.quarter;
         if (ticks >= NoteDuration.eighth.getTicksAtTPQN480()) return NoteDuration.eighth;
         return NoteDuration.sixteenth;
+    }
+  }
+
+  static Accidental _accidentalFromMusicXml(String value) {
+    switch (value) {
+      case 'sharp':
+        return Accidental.sharp;
+      case 'flat':
+        return Accidental.flat;
+      case 'double-sharp':
+      case 'sharp-sharp':
+        return Accidental.doubleSharp;
+      case 'double-flat':
+        return Accidental.doubleFlat;
+      case 'natural':
+      default:
+        return Accidental.natural;
     }
   }
 }

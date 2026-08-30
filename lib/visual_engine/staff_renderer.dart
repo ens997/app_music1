@@ -183,7 +183,7 @@ class StaffRenderer {
     final symbol = BravuraGlyphs.accidental(
       keySignature.isSharp ? Accidental.sharp : Accidental.flat,
     );
-    final count = keySignature.alterationCount;
+    final count = keySignature.alterationCount.clamp(0, 7);
     final staffPositions = _keySignatureStaffPositions(keySignature, clefType);
     final painter = BravuraGlyphs.buildPainter(
       symbol,

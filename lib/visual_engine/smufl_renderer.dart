@@ -1,31 +1,41 @@
 import 'note_visual.dart';
 import 'dart:ui' as ui;
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../core/core.dart';
 import 'staff_renderer.dart' as sr;
 import 'note_visual.dart' as nv;
 import 'animation_manager.dart' as am;
-import 'note_layout.dart'; // <-- nueva importación
+import 'note_layout.dart';
 
 /// Renderizador visual principal usando Canvas
 /// Versión OPTIMIZADA para móvil:
 /// - Cache del pentagrama en Picture
 /// - Pinceles estáticos (sin creación en paint)
 /// - Dibujo eficiente de notas usando posiciones precalculadas
+/// - Culling: solo dibuja notas visibles en el viewport
 class SMuFLRenderer extends CustomPainter {
   static const double compactStaffTop = 43;
+  static const double _cullingMargin = 96;
 
   final TicksEngine? ticksEngine;
   final TimeSignature? timeSignature;
   final KeySignature? keySignature;
-  final List<NoteLayout> noteLayouts; // <-- reemplaza a visibleNotes
+  final List<NoteLayout> noteLayouts;
   final am.AnimationManager animationManager;
   final ClefType clefType;
   final bool showTimeSignature;
   final bool showKeySignature;
   final bool showBarLines;
   final bool showHitLine;
+  final bool showStaff;
+  final bool showNotes;
+  final bool showBeams;
   final double? hitLineXOverride;
+
+  // Nuevos parámetros para culling
+  final double? scrollOffset;
+  final double? viewportWidth;
 
   final Color backgroundColor;
   final Color staffColor;
@@ -34,6 +44,8 @@ class SMuFLRenderer extends CustomPainter {
   // Cache del pentagrama
   ui.Picture? _cachedStaffPicture;
   Size? _lastCacheSize;
+  late final List<double> _barLineXPositions;
+  late final List<List<NoteLayout>> _beamGroups;
 
   // Pinceles estáticos
   static final Paint _backgroundPaint = Paint();
@@ -59,18 +71,31 @@ class SMuFLRenderer extends CustomPainter {
     this.ticksEngine,
     this.timeSignature,
     this.keySignature,
-    required this.noteLayouts, // <-- ahora requerido
+    required this.noteLayouts,
     required this.animationManager,
     this.clefType = ClefType.treble,
     this.showTimeSignature = true,
     this.showKeySignature = true,
     this.showBarLines = true,
     this.showHitLine = true,
+    this.showStaff = true,
+    this.showNotes = true,
+    this.showBeams = true,
     this.hitLineXOverride,
+    this.scrollOffset,
+    this.viewportWidth,
+    ValueListenable<double>? scrollOffsetListenable,
+    Listenable? repaint,
     this.backgroundColor = const Color(0xFFFFFFFF),
     this.staffColor = Colors.black87,
     this.noteColor = Colors.black,
-  });
+  })  : scrollOffsetListenable = scrollOffsetListenable,
+        super(repaint: repaint) {
+    _barLineXPositions = _calculateBarLineXPositions();
+    _beamGroups = _groupBeamedNotes(noteLayouts);
+  }
+
+  final ValueListenable<double>? scrollOffsetListenable;
 
   // ============================================================
   // CONSTRUCCIÓN DEL CACHE DEL PENTAGRAMA
@@ -101,17 +126,23 @@ class SMuFLRenderer extends CustomPainter {
   void paint(Canvas canvas, Size size) {
     if (size.width == 0 || size.height == 0) return;
 
-    // Dibujar cache del pentagrama
-    if (_cachedStaffPicture == null || _lastCacheSize != size) {
-      _buildStaffCache(size);
+    // Dibujar cache del pentagrama solo en la capa estática.
+    if (showStaff) {
+      if (_cachedStaffPicture == null || _lastCacheSize != size) {
+        _buildStaffCache(size);
+      }
+      canvas.drawPicture(_cachedStaffPicture!);
     }
-    canvas.drawPicture(_cachedStaffPicture!);
 
-    // Dibujar notas (usando posiciones precalculadas)
-    _drawNotes(canvas, size);
+    // Dibujar notas (usando posiciones precalculadas + culling)
+    if (showNotes) _drawNotes(canvas, size);
 
-    // Dibujar beams (usando posiciones precalculadas)
-    _drawBeams(canvas);
+    // Dibujar beams (usando posiciones precalculadas + culling)
+    if (showBeams) _drawBeams(canvas);
+
+    if (showBarLines && !showNotes && noteLayouts.isNotEmpty) {
+      _drawBarLines(canvas);
+    }
 
     // Línea de beat (si está activa)
     if (showHitLine && hitLineXOverride != null) {
@@ -174,51 +205,45 @@ class SMuFLRenderer extends CustomPainter {
   }
 
   // ============================================================
-  // DIBUJO DE NOTAS (usando posiciones precalculadas)
+  // DIBUJO DE NOTAS (con culling)
   // ============================================================
 
   void _drawNotes(Canvas canvas, Size size) {
-  if (noteLayouts.isEmpty) return;
+    if (noteLayouts.isEmpty) return;
 
-  for (final layout in noteLayouts) {
-    // Pasamos los 5 argumentos: canvas, note, position (Offset), staffTop, color
-    NoteVisual.drawNote(
-      canvas,
-      layout.note,
-      layout.position,      // Offset (X,Y) de la cabeza
-      compactStaffTop,      // staffTop (constante)
-      noteColor,
-    );
-  }
+    // Calcular rango visible si se proporcionan los parámetros
+    double? startX, endX;
+    final currentScrollOffset = scrollOffsetListenable?.value ?? scrollOffset;
+    if (currentScrollOffset != null && viewportWidth != null) {
+      startX = currentScrollOffset - _cullingMargin;
+      endX = currentScrollOffset + viewportWidth! + _cullingMargin;
+    }
 
-  if (showBarLines && noteLayouts.isNotEmpty) {
-    _drawBarLines(canvas);
+    for (final layout in noteLayouts) {
+      // Culling: saltar notas fuera del viewport
+      if (startX != null && endX != null) {
+        if (layout.position.dx < startX || layout.position.dx > endX) continue;
+      }
+      NoteVisual.drawNote(
+        canvas,
+        layout.note,
+        layout.position,
+        compactStaffTop,
+        noteColor,
+      );
+    }
+
+    if (showBarLines && noteLayouts.isNotEmpty) {
+      _drawBarLines(canvas);
+    }
   }
-}
 
   // ============================================================
   // DIBUJO DE LÍNEAS DE COMPÁS
   // ============================================================
 
   void _drawBarLines(Canvas canvas) {
-    final ticksPerMeasure = _ticksPerMeasure();
-    if (ticksPerMeasure <= 0) return;
-
-    // Agrupar por compás según los ticks de cada nota
-    final measureMap = <int, List<NoteLayout>>{};
-    for (final layout in noteLayouts) {
-      final measure = layout.note.absoluteTick ~/ ticksPerMeasure;
-      measureMap.putIfAbsent(measure, () => []).add(layout);
-    }
-
-    final measures = measureMap.keys.toList()..sort();
-    for (int i = 0; i < measures.length - 1; i++) {
-      final currentMeasure = measures[i];
-      final nextMeasure = measures[i + 1];
-      final lastLayout = measureMap[currentMeasure]!.last;
-      final firstLayout = measureMap[nextMeasure]!.first;
-      final barX = (lastLayout.position.dx + firstLayout.position.dx) / 2.0;
-
+    for (final barX in _barLineXPositions) {
       sr.StaffRenderer.drawBarLine(
         canvas,
         Offset(barX, compactStaffTop),
@@ -228,11 +253,24 @@ class SMuFLRenderer extends CustomPainter {
   }
 
   // ============================================================
-  // DIBUJO DE BEAMS (usando posiciones precalculadas)
+  // DIBUJO DE BEAMS (con culling)
   // ============================================================
 
   void _drawBeams(Canvas canvas) {
-    final groups = _groupBeamedNotes(noteLayouts);
+    final currentScrollOffset = scrollOffsetListenable?.value ?? scrollOffset;
+    final groups = currentScrollOffset != null && viewportWidth != null
+      ? _beamGroups
+        .map((group) => group
+          .where(
+            (layout) =>
+              layout.position.dx >= currentScrollOffset - _cullingMargin &&
+              layout.position.dx <=
+                currentScrollOffset + viewportWidth! + _cullingMargin,
+          )
+          .toList())
+        .where((group) => group.isNotEmpty)
+        .toList()
+      : _beamGroups;
     if (groups.isEmpty) return;
 
     // Pinceles para stems y beams (estáticos)
@@ -275,13 +313,14 @@ class SMuFLRenderer extends CustomPainter {
       for (int i = 0; i < group.length; i++) {
         final offset = noteOffsets[i];
         final stemX = offset.dx + (stemUp ? 8 : -8);
+        final noteLevel = _maxBeamLevelForNote(group[i].note);
         final stemEndY = _beamYAtX(
           stemX,
           firstStemX,
           naturalFirstBeamY,
           lastStemX,
           clampedLastBeamY,
-          0.0, // nivel 1
+          _beamLevelOffset(stemDirection, noteLevel),
         );
         canvas.drawLine(
           Offset(stemX, offset.dy),
@@ -303,7 +342,7 @@ class SMuFLRenderer extends CustomPainter {
           .fold<int>(1, (max, v) => v > max ? v : max);
 
       for (int level = 2; level <= maxBeamLevel; level++) {
-        final levelOffset = stemDirection * 7.5 * (level - 1); // spacing
+        final levelOffset = _beamLevelOffset(stemDirection, level);
         for (int i = 0; i < group.length - 1; i++) {
           if (!_hasContinuousBeamBetween(group[i].note, group[i + 1].note, level)) continue;
           final startX = noteOffsets[i].dx + (stemUp ? 8 : -8);
@@ -330,14 +369,19 @@ class SMuFLRenderer extends CustomPainter {
         // Hooks (ganchos) para notas sueltas en el nivel
         for (int i = 0; i < group.length; i++) {
           final note = group[i].note;
-          if (!_hasBeamLevel(note, level)) continue;
+          final beamType = _effectiveBeamType(note, level);
+          if (beamType == BeamType.none) continue;
           final hasLeft = i > 0 && _hasContinuousBeamBetween(group[i-1].note, note, level);
           final hasRight = i < group.length - 1 && _hasContinuousBeamBetween(note, group[i+1].note, level);
           if (hasLeft || hasRight) continue;
 
           final startX = noteOffsets[i].dx + (stemUp ? 8 : -8);
           final hookLength = 16.0;
-          final endX = (i == group.length - 1) ? startX - hookLength : startX + hookLength;
+          final endX = switch (beamType) {
+            BeamType.backwardHook => startX - hookLength,
+            BeamType.forwardHook => startX + hookLength,
+            _ => (i == group.length - 1) ? startX - hookLength : startX + hookLength,
+          };
           final startY = _beamYAtX(
             startX,
             firstStemX,
@@ -412,10 +456,6 @@ class SMuFLRenderer extends CustomPainter {
     return maxLevel == 0 ? 1 : maxLevel;
   }
 
-  bool _hasBeamLevel(NoteModel note, int level) {
-    return _effectiveBeamType(note, level) != BeamType.none;
-  }
-
   BeamType _effectiveBeamType(NoteModel note, int level) {
     if (level == 1) return note.beamType;
     final beamType = note.beamLevels[level];
@@ -438,6 +478,11 @@ class SMuFLRenderer extends CustomPainter {
     if ((endX - startX).abs() < 0.001) return startY + levelOffset;
     final t = (x - startX) / (endX - startX);
     return startY + ((endY - startY) * t) + levelOffset;
+  }
+
+  double _beamLevelOffset(double stemDirection, int level) {
+    // El nivel secundario queda debajo del principal en la agrupación visual.
+    return -stemDirection * 7.5 * (level - 1);
   }
 
   // ============================================================
@@ -469,6 +514,25 @@ class SMuFLRenderer extends CustomPainter {
     return (TicksEngine.tpnq * timeSignature!.numerator * 4) ~/ timeSignature!.denominator;
   }
 
+  List<double> _calculateBarLineXPositions() {
+    final ticksPerMeasure = _ticksPerMeasure();
+    if (ticksPerMeasure <= 0 || noteLayouts.isEmpty) return [];
+
+    final measureMap = <int, List<NoteLayout>>{};
+    for (final layout in noteLayouts) {
+      final measure = layout.note.absoluteTick ~/ ticksPerMeasure;
+      measureMap.putIfAbsent(measure, () => []).add(layout);
+    }
+
+    final measures = measureMap.keys.toList()..sort();
+    return [
+      for (int i = 0; i < measures.length - 1; i++)
+        (measureMap[measures[i]]!.last.position.dx +
+                measureMap[measures[i + 1]]!.first.position.dx) /
+            2.0,
+    ];
+  }
+
   // ============================================================
   // SHOULD REPAINT
   // ============================================================
@@ -485,10 +549,16 @@ class SMuFLRenderer extends CustomPainter {
         oldDelegate.showKeySignature != showKeySignature ||
         oldDelegate.showBarLines != showBarLines ||
         oldDelegate.showHitLine != showHitLine ||
+        oldDelegate.showStaff != showStaff ||
+        oldDelegate.showNotes != showNotes ||
+        oldDelegate.showBeams != showBeams ||
         oldDelegate.hitLineXOverride != hitLineXOverride ||
         oldDelegate.backgroundColor != backgroundColor ||
         oldDelegate.staffColor != staffColor ||
         oldDelegate.noteColor != noteColor ||
-        oldDelegate.animationManager != animationManager;
+        oldDelegate.animationManager != animationManager ||
+        oldDelegate.scrollOffset != scrollOffset ||
+        oldDelegate.scrollOffsetListenable != scrollOffsetListenable ||
+        oldDelegate.viewportWidth != viewportWidth;
   }
 }

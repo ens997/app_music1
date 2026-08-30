@@ -282,7 +282,9 @@ enum BeamType {
   none,     // Sin barra
   begin,    // Inicio de barra
   continuation, // Continuación de barra
-  end;      // Fin de barra
+  end,      // Fin de barra
+  forwardHook,  // Hook que se extiende hacia la siguiente nota
+  backwardHook; // Hook que se extiende hacia la nota anterior
 
   /// Es parte de una barra
   bool get isBeamed => this != BeamType.none;

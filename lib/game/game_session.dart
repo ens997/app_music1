@@ -16,6 +16,10 @@ class GameSession {
   int _maxCombo = 0;
   List<HitQuality> _hitHistory = [];
   GameState _state = GameState.idle;
+  late final bool _hasPlayableNotes;
+  late final int _completionTick;
+  late final List<int> _playableNoteIndices;
+  int _nextPlayablePosition = 0;
 
   // Callbacks para notificar cambios de estado
   final List<void Function(GameState)> _stateListeners = [];
@@ -32,6 +36,10 @@ class GameSession {
   Set<int> get hitNoteIndices => _hitNoteIndices;
   List<HitQuality> get hitHistory => _hitHistory;
 
+  bool get hasPlayableNotes => _hasPlayableNotes;
+
+  int get completionTick => _completionTick;
+
   GameSession({
     required this.ticksEngine,
     required this.scoreEngine,
@@ -41,6 +49,18 @@ class GameSession {
     // En el futuro, se puede ajustar para anacrusa o compensaciones
     for (var note in musicScore.notes) {
       note.targetTick = note.absoluteTick;
+    }
+
+    _hasPlayableNotes = musicScore.notes.any((note) => !note.isRest);
+    _playableNoteIndices = [
+      for (var i = 0; i < musicScore.notes.length; i++)
+        if (!musicScore.notes[i].isRest) i,
+    ];
+    if (_hasPlayableNotes) {
+      final lastPlayableNote = musicScore.notes.lastWhere((note) => !note.isRest);
+      _completionTick = lastPlayableNote.targetTick + hitWindow.goodWindow;
+    } else {
+      _completionTick = 0;
     }
   }
 
@@ -91,8 +111,8 @@ class GameSession {
   // ============================================================
 
   /// Procesa la entrada del usuario (una nota tocada en el piano)
-  void handleNoteInput(String pitch) {
-    if (_state != GameState.playing) return;
+  bool handleNoteInput(String pitch) {
+    if (_state != GameState.playing) return false;
 
     final currentTick = ticksEngine.currentTick;
 
@@ -102,7 +122,12 @@ class GameSession {
     int closestDeviation = 0; // en ticks
     int minDeviation = 1000000; // valor muy grande
 
-    for (int i = 0; i < musicScore.notes.length; i++) {
+    _advancePlayableCursor();
+    final candidateStart = _nextPlayablePosition;
+    for (int position = candidateStart;
+        position < _playableNoteIndices.length;
+        position++) {
+      final i = _playableNoteIndices[position];
       if (_hitNoteIndices.contains(i)) continue; // ya golpeada o perdida
 
       final note = musicScore.notes[i];
@@ -116,8 +141,8 @@ class GameSession {
     }
 
     // Si no hay nota candidata o está fuera de la ventana máxima, ignorar
-    if (closestNote == null || closestIndex == -1) return;
-    if (minDeviation > hitWindow.goodWindow) return; // fuera de tiempo
+    if (closestNote == null || closestIndex == -1) return false;
+    if (minDeviation > hitWindow.goodWindow) return false; // fuera de tiempo
 
     // 2. Normalizar el pitch (comparar sin alteraciones accidentales)
     final expectedPitch = _normalizePitch(closestNote.pitch);
@@ -130,11 +155,17 @@ class GameSession {
       // Si falla, se marca como miss (no se añade a score)
       closestNote.markAsMissed();
       _hitNoteIndices.add(closestIndex);
+      _advancePlayableCursor();
       _currentCombo = 0;
       _hitHistory.add(HitQuality.miss);
       _notifyNoteHit();
-      return;
+      if (_nextPlayablePosition >= _playableNoteIndices.length) {
+        finish();
+      }
+      return false;
     }
+
+    bool success = false;
 
     // 4. Actualizar puntuación y combo si la nota es correcta
     if (isCorrectPitch) {
@@ -145,6 +176,7 @@ class GameSession {
 
       // Marcar nota como golpeada
       closestNote.markAsHit(quality, currentTick);
+      success = true;
     } else {
       // Nota incorrecta: se pierde combo, pero no se suman puntos
       _currentCombo = 0;
@@ -152,6 +184,7 @@ class GameSession {
     }
 
     _hitNoteIndices.add(closestIndex);
+    _advancePlayableCursor();
     _hitHistory.add(quality);
     if (_hitHistory.length > 20) _hitHistory.removeAt(0); // limitar historial
 
@@ -160,9 +193,11 @@ class GameSession {
     _notifyNoteHit();
 
     // 6. Si todas las notas han sido procesadas, finalizar
-    if (_hitNoteIndices.length >= musicScore.notes.length) {
+    if (_nextPlayablePosition >= _playableNoteIndices.length) {
       finish();
     }
+
+    return success;
   }
 
   // ============================================================
@@ -177,8 +212,16 @@ class GameSession {
     }
   }
 
+  void _advancePlayableCursor() {
+    while (_nextPlayablePosition < _playableNoteIndices.length &&
+        _hitNoteIndices.contains(_playableNoteIndices[_nextPlayablePosition])) {
+      _nextPlayablePosition++;
+    }
+  }
+
   void _resetGameState() {
     _hitNoteIndices.clear();
+    _nextPlayablePosition = 0;
     _currentScore = 0;
     _currentCombo = 0;
     _maxCombo = 0;
