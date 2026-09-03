@@ -1,5 +1,7 @@
 import '../core/core.dart';
 import '../parsers/musicxml_parser.dart';
+import '../audio/piano_audio_service.dart';
+import 'metronome_controller.dart';
 
 /// Sesión de juego que orquesta toda la lógica de detección de hits,
 /// puntuación, combos y gestión del estado del juego.
@@ -8,6 +10,7 @@ class GameSession {
   final ScoreEngine scoreEngine;
   final MusicScore musicScore;
   final HitWindow hitWindow;
+  late final MetronomeController metronomeController;
 
   // Estado mutable del juego
   Set<int> _hitNoteIndices = {};
@@ -44,12 +47,21 @@ class GameSession {
     required this.ticksEngine,
     required this.scoreEngine,
     required this.musicScore,
+    PianoAudioService? audioService,
   }) : hitWindow = HitWindow(ticksEngine) {
     // Inicializar targetTick de cada nota (por defecto es absoluteTick)
     // En el futuro, se puede ajustar para anacrusa o compensaciones
     for (var note in musicScore.notes) {
       note.targetTick = note.absoluteTick;
     }
+
+    // Inicializar metrónomo con la métrica del MusicXML
+    final audioSvc = audioService ?? PianoAudioService();
+    metronomeController = MetronomeController(
+      ticksEngine: ticksEngine,
+      timeSignature: musicScore.timeSignature,
+      audioService: audioSvc,
+    );
 
     _hasPlayableNotes = musicScore.notes.any((note) => !note.isRest);
     _playableNoteIndices = [
@@ -72,24 +84,27 @@ class GameSession {
     if (_state == GameState.playing) return;
     _changeState(GameState.playing);
     ticksEngine.start();
-    // Aquí se podría iniciar el metrónomo, pero se hará en otro módulo
+    metronomeController.start();
   }
 
   void pause() {
     if (_state != GameState.playing) return;
     _changeState(GameState.paused);
     ticksEngine.pause();
+    metronomeController.stop();
   }
 
   void resume() {
     if (_state != GameState.paused) return;
     _changeState(GameState.playing);
     ticksEngine.resume();
+    metronomeController.start();
   }
 
   void stop() {
     _changeState(GameState.idle);
     ticksEngine.reset();
+    metronomeController.stop();
     _resetGameState();
   }
 
@@ -102,8 +117,16 @@ class GameSession {
   void finish() {
     _changeState(GameState.finished);
     ticksEngine.pause();
+    metronomeController.stop();
     // Notificar que el juego ha terminado (la UI mostrará resultados)
     _notifyScoreChanged();
+  }
+
+  /// Actualiza el estado del juego
+  /// Se debe llamar cada frame del game loop (aproximadamente 60fps)
+  Future<void> update() async {
+    ticksEngine.update();
+    await metronomeController.update();
   }
 
   // ============================================================

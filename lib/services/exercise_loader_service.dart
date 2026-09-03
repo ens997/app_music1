@@ -121,6 +121,17 @@ class ExerciseLoaderService {
     return _exerciseMap[id];
   }
 
+  /// Obtiene el primer ejercicio disponible (por defecto es el primero de la lista)
+  Exercise? getFirstExercise() {
+    return _exercises.isNotEmpty ? _exercises.first : null;
+  }
+
+  /// Obtiene los ejercicios por dificultad, ordenados
+  Future<Exercise?> loadAndGetFirstExercise() async {
+    await loadExercises();
+    return getFirstExercise();
+  }
+
   List<Exercise> searchExercises(String query) {
     final lowerQuery = query.toLowerCase();
     return _exercises.where((exercise) {

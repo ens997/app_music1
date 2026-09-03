@@ -7,6 +7,8 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import 'metronome_click_generator.dart';
+
 /// Servicio de audio optimizado para piano.
 /// - Genera ondas en Isolate (no bloquea UI).
 /// - Cachea las ondas en disco para reutilización.
@@ -83,6 +85,23 @@ class PianoAudioService {
       _initializationCompleter?.completeError(e);
       rethrow;
     }
+  }
+
+  /// Reproduce un click de metrónomo (percusión suave).
+  /// isAccent: true para click de acento (más fuerte), false para click normal.
+  Future<void> playMetronomeClick({required bool isAccent, double volume = 0.85}) async {
+    if (!_initialized) {
+      await initialize();
+    }
+
+    final bytes = MetronomeClickGenerator.buildClick(isAccent: isAccent);
+    final player = _players[_playerIndex];
+    _playerIndex = (_playerIndex + 1) % _players.length;
+
+    await player.play(
+      BytesSource(bytes),
+      volume: volume.clamp(0.0, 1.0),
+    );
   }
 
   /// Reproduce una nota (pool de reproductores).
