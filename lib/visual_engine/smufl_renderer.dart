@@ -149,8 +149,9 @@ class SMuFLRenderer extends CustomPainter {
       _drawHitLine(canvas, hitLineXOverride!);
     }
 
-    // Animaciones
-    animationManager.updateAndDraw(canvas, size);
+    // Animaciones (solo en la capa de notas; evita dibujarlas dos veces
+    // cuando el pentagrama estático y las notas usan el mismo AnimationManager).
+    if (showNotes) animationManager.updateAndDraw(canvas, size);
   }
 
   // ============================================================

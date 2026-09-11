@@ -27,10 +27,11 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
   void initState() {
     super.initState();
     _tabController = TabController(
-      length: 4,
+      length: 3,
       vsync: this,
     );
     _tabController.addListener(_onTabChanged);
+    _selectedDifficulty = Difficulty.initial;
     _updateFilteredExercises();
   }
 
@@ -42,7 +43,7 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
 
   void _onTabChanged() {
     setState(() {
-      _selectedDifficulty = null;
+      _selectedDifficulty = Difficulty.values[_tabController.index];
       _selectedType = null;
       _searchQuery = '';
       _updateFilteredExercises();
@@ -82,8 +83,7 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
-            Tab(text: '📚 Todos'),
-            Tab(text: '🌱 Principiante'),
+            Tab(text: 'Inicial'),
             Tab(text: '⚡ Intermedio'),
             Tab(text: '🔥 Avanzado'),
           ],
@@ -309,14 +309,12 @@ class _ExerciseSelectionScreenState extends State<ExerciseSelectionScreen>
 
   String _getDifficultyLabel(Difficulty difficulty) {
     switch (difficulty) {
-      case Difficulty.beginner:
-        return '🌱 Principiante';
+      case Difficulty.initial:
+        return 'Inicial';
       case Difficulty.intermediate:
         return '⚡ Intermedio';
       case Difficulty.advanced:
         return '🔥 Avanzado';
-      case Difficulty.expert:
-        return '💪 Experto';
     }
   }
 

@@ -84,14 +84,12 @@ class Exercise {
 
   Color get difficultyColor {
     switch (difficulty) {
-      case Difficulty.beginner:
+      case Difficulty.initial:
         return Colors.green;
       case Difficulty.intermediate:
         return Colors.orange;
       case Difficulty.advanced:
         return Colors.red;
-      case Difficulty.expert:
-        return Colors.purple;
     }
   }
 

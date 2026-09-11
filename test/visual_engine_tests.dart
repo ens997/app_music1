@@ -44,43 +44,55 @@ void main() {
 	});
 
 	group('AnimationManager', () {
-		test('adds feedback and accuracy animations', () {
+		test('adds hit feedback animations per tier', () {
 			final manager = AnimationManager();
 
-			manager.addHitFeedback(const Offset(20, 30), HitQuality.perfect);
-			manager.addAccuracyAnimation(
-				const Offset(20, 30),
-				HitQuality.great,
-				-24,
-			);
+			manager.addHitFeedback(const Offset(20, 30), FeedbackTier.perfect);
 
 			expect(manager.feedbackAnimations, hasLength(1));
-			expect(manager.accuracyAnimations, hasLength(1));
-			expect(manager.accuracyAnimations.single.text, contains('24ms'));
+			expect(manager.feedbackAnimations.single.tier, FeedbackTier.perfect);
 		});
 
-		test('only adds combo feedback at combo five or higher', () {
+		test('caps concurrent feedback animations by dropping the oldest', () {
 			final manager = AnimationManager();
 
-			manager.addComboAnimation(const Offset(0, 0), 4);
-			expect(manager.comboAnimations, isEmpty);
+			for (var i = 0; i < 12; i++) {
+				manager.addHitFeedback(Offset(i.toDouble(), 0), FeedbackTier.good);
+			}
 
-			manager.addComboAnimation(const Offset(0, 0), 5);
-			expect(manager.comboAnimations, hasLength(1));
-			expect(manager.comboAnimations.single.text, 'Combo x5');
+			expect(manager.feedbackAnimations.length, lessThanOrEqualTo(8));
 		});
 
-		test('clearAll removes every animation type', () {
+		test('clearAll removes every feedback animation', () {
 			final manager = AnimationManager();
-			manager.addHitFeedback(Offset.zero, HitQuality.good);
-			manager.addComboAnimation(Offset.zero, 5);
-			manager.addAccuracyAnimation(Offset.zero, HitQuality.good, 10);
+			manager.addHitFeedback(Offset.zero, FeedbackTier.good);
 
 			manager.clearAll();
 
 			expect(manager.feedbackAnimations, isEmpty);
-			expect(manager.comboAnimations, isEmpty);
-			expect(manager.accuracyAnimations, isEmpty);
+		});
+
+		test('fromHit maps quality and pitch correctness to the right tier', () {
+			expect(
+				FeedbackTier.fromHit(HitQuality.perfect, true),
+				FeedbackTier.perfect,
+			);
+			expect(
+				FeedbackTier.fromHit(HitQuality.great, true),
+				FeedbackTier.good,
+			);
+			expect(
+				FeedbackTier.fromHit(HitQuality.good, true),
+				FeedbackTier.good,
+			);
+			expect(
+				FeedbackTier.fromHit(HitQuality.miss, true),
+				FeedbackTier.miss,
+			);
+			expect(
+				FeedbackTier.fromHit(HitQuality.perfect, false),
+				FeedbackTier.miss,
+			);
 		});
 	});
 

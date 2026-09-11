@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
+import '../audio/game_audio_track_controller.dart';
 import '../audio/piano_audio_service.dart';
 import '../core/core.dart';
 import '../core/globals.dart';
@@ -37,6 +38,8 @@ class GameScreen extends StatefulWidget {
 
 class _GameScreenState extends State<GameScreen> {
   final AnimationManager _animationManager = AnimationManager();
+  final GameAudioTrackController _gameAudioTrackController =
+      GameAudioTrackController();
   final PianoAudioService _pianoAudioService = PianoAudioService();
   static const double _basePixelsPerTick = 0.35;
   static const Duration _autoScrollInterval = Duration(milliseconds: 16);
@@ -59,7 +62,7 @@ class _GameScreenState extends State<GameScreen> {
   // --- ValueNotifier para los layouts precalculados ---
   final ValueNotifier<List<NoteLayout>> _noteLayoutsNotifier =
       ValueNotifier<List<NoteLayout>>([]);
-  
+
   // --- ValueNotifier para el offset del scroll ---
   final ValueNotifier<double> _scrollOffset = ValueNotifier(0.0);
   final ValueNotifier<int> _gameRevision = ValueNotifier(0);
@@ -77,12 +80,10 @@ class _GameScreenState extends State<GameScreen> {
     musicStartOffsetScale.addListener(_updateNoteLayouts);
 
     _audioInitialization = _initializeAudio();
-    _audioInitialization
-        .then((_) => _loadConfiguredContent())
-        .catchError((e) {
-          debugPrint('Error inicializando audio: $e');
-          _loadConfiguredContent();
-        });
+    _audioInitialization.then((_) => _loadConfiguredContent()).catchError((e) {
+      debugPrint('Error inicializando audio: $e');
+      _loadConfiguredContent();
+    });
   }
 
   Future<void> _loadConfiguredContent() async {
@@ -105,6 +106,7 @@ class _GameScreenState extends State<GameScreen> {
   void dispose() {
     _stopAutoScroll();
     _scrollController.dispose();
+    unawaited(_gameAudioTrackController.dispose());
     _pianoAudioService.dispose();
     _gameSession?.stop();
     _noteLayoutsNotifier.dispose();
@@ -127,6 +129,14 @@ class _GameScreenState extends State<GameScreen> {
     try {
       final score = MusicXMLParser.parse(content);
       if (mounted) {
+        if (widget.exercise != null) {
+          await _gameAudioTrackController.prepare(widget.exercise!.assetPath);
+        } else if (widget.fileName != null) {
+          await _gameAudioTrackController.prepareFromAssetName(
+            widget.fileName!,
+          );
+        }
+        if (!mounted) return;
         setState(() {
           _loadedScore = score;
           _isPlaying = false;
@@ -137,11 +147,10 @@ class _GameScreenState extends State<GameScreen> {
             musicScore: score,
             audioService: _pianoAudioService,
           );
-          _gameSession!.onNoteHit(() {
-            if (mounted) _gameRevision.value++;
-          });
+          _attachGameSessionListeners();
           if (widget.exercise != null) {
-            _status = '🎵 ${widget.exercise!.title} - ${widget.exercise!.composer}';
+            _status =
+                '🎵 ${widget.exercise!.title} - ${widget.exercise!.composer}';
           }
         });
         _updateNoteLayouts();
@@ -163,6 +172,8 @@ class _GameScreenState extends State<GameScreen> {
       final content = await File(filePath).readAsString();
       final score = MusicXMLParser.parse(content);
       if (mounted) {
+        await _gameAudioTrackController.prepare(filePath);
+        if (!mounted) return;
         setState(() {
           _loadedScore = score;
           _isPlaying = false;
@@ -173,9 +184,7 @@ class _GameScreenState extends State<GameScreen> {
             musicScore: score,
             audioService: _pianoAudioService,
           );
-          _gameSession!.onNoteHit(() {
-            if (mounted) _gameRevision.value++;
-          });
+          _attachGameSessionListeners();
         });
         _updateNoteLayouts();
         await _prepareForPlayback();
@@ -211,6 +220,8 @@ class _GameScreenState extends State<GameScreen> {
       if (!mounted) return;
 
       final score = MusicXMLParser.parse(content);
+      await _gameAudioTrackController.prepare(firstExercise.assetPath);
+      if (!mounted) return;
       setState(() {
         _loadedScore = score;
         _isPlaying = false;
@@ -221,9 +232,7 @@ class _GameScreenState extends State<GameScreen> {
           musicScore: score,
           audioService: _pianoAudioService,
         );
-        _gameSession!.onNoteHit(() {
-          if (mounted) _gameRevision.value++;
-        });
+        _attachGameSessionListeners();
       });
       _updateNoteLayouts();
       await _prepareForPlayback();
@@ -235,6 +244,21 @@ class _GameScreenState extends State<GameScreen> {
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  /// Registra los listeners de GameSession comunes a todas las rutas de carga:
+  /// revisión de UI en cada hit y feedback visual minimalista por nota.
+  void _attachGameSessionListeners() {
+    final session = _gameSession!;
+    session.onNoteHit(() {
+      if (mounted) _gameRevision.value++;
+    });
+    session.onNoteFeedback((noteIndex, quality, isCorrectPitch) {
+      final layouts = _noteLayoutsNotifier.value;
+      if (noteIndex < 0 || noteIndex >= layouts.length) return;
+      final tier = FeedbackTier.fromHit(quality, isCorrectPitch);
+      _animationManager.addHitFeedback(layouts[noteIndex].position, tier);
+    });
   }
 
   Future<void> _initializeAudio() async {
@@ -275,7 +299,8 @@ class _GameScreenState extends State<GameScreen> {
 
     final layouts = score.notes.map((note) {
       final x = hitLineX + ((note.absoluteTick - baseTick) * pixelsPerTick);
-      final staffPosition = NoteVisual.notePositions[NoteVisual.basePitchKey(note.pitch)] ?? 5;
+      final staffPosition =
+          NoteVisual.notePositions[NoteVisual.basePitchKey(note.pitch)] ?? 5;
       final y = StaffRenderer.getNoteYPosition(_staffTop, staffPosition);
       return NoteLayout(note, Offset(x, y));
     }).toList();
@@ -303,10 +328,12 @@ class _GameScreenState extends State<GameScreen> {
       _isPlaying = true;
       _status = '';
     });
+    unawaited(_gameAudioTrackController.playFromStart());
     _startAutoScrollForLoadedScore();
   }
 
   void _finishGame() {
+    unawaited(_gameAudioTrackController.stop());
     _gameSession?.finish();
     if (widget.exercise != null && mounted) {
       final provider = context.read<ExerciseProvider>();
@@ -322,6 +349,7 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   void _resetAndRestart() {
+    unawaited(_gameAudioTrackController.stop());
     _gameSession?.restart();
     _scrollController.jumpTo(0);
     setState(() {});
@@ -358,7 +386,10 @@ class _GameScreenState extends State<GameScreen> {
               const Divider(),
               Text(
                 '🏆 Mejor Puntuación: ${widget.exercise!.bestScore.toStringAsFixed(0)}',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
               ),
               Text(
                 '✅ Veces completado: ${widget.exercise!.timesCompleted}',
@@ -398,7 +429,8 @@ class _GameScreenState extends State<GameScreen> {
     _lastAutoScrollFrame = DateTime.now();
 
     _autoScrollTimer = Timer.periodic(_autoScrollInterval, (_) async {
-      if (!mounted || !_scrollController.hasClients || _gameSession == null) return;
+      if (!mounted || !_scrollController.hasClients || _gameSession == null)
+        return;
 
       // Actualizar la sesión del juego (incluye ticksEngine y metrónomo)
       await _gameSession!.update();
@@ -468,7 +500,9 @@ class _GameScreenState extends State<GameScreen> {
   Widget build(BuildContext context) {
     final game = _gameSession;
     if (_loadedScore == null || game == null) {
-      final loadingMessage = _status.isNotEmpty ? _status : 'Cargando ejercicio...';
+      final loadingMessage = _status.isNotEmpty
+          ? _status
+          : 'Cargando ejercicio...';
       return Scaffold(
         appBar: AppBar(
           elevation: 0,
@@ -483,10 +517,7 @@ class _GameScreenState extends State<GameScreen> {
               const SizedBox(height: 16),
               Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 24),
-                child: Text(
-                  loadingMessage,
-                  textAlign: TextAlign.center,
-                ),
+                child: Text(loadingMessage, textAlign: TextAlign.center),
               ),
             ],
           ),
@@ -519,11 +550,17 @@ class _GameScreenState extends State<GameScreen> {
                 ),
                 const Spacer(),
                 IconButton(
-                  onPressed: _isPlaying || _isPreparing ? null : _startFromBeginning,
+                  onPressed: _isPlaying || _isPreparing
+                      ? null
+                      : _startFromBeginning,
                   icon: Icon(
-                    _isPlaying ? Icons.play_circle_outline : Icons.play_circle_filled,
+                    _isPlaying
+                        ? Icons.play_circle_outline
+                        : Icons.play_circle_filled,
                     size: 36,
-                    color: _isPlaying ? Colors.grey : Theme.of(context).colorScheme.primary,
+                    color: _isPlaying
+                        ? Colors.grey
+                        : Theme.of(context).colorScheme.primary,
                   ),
                   tooltip: 'Iniciar',
                   padding: EdgeInsets.zero,
@@ -536,7 +573,10 @@ class _GameScreenState extends State<GameScreen> {
             // Controles del metrónomo
             if (_gameSession != null)
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 8,
+                ),
                 decoration: BoxDecoration(
                   color: Colors.grey.shade200,
                   borderRadius: BorderRadius.circular(6),
@@ -591,8 +631,13 @@ class _GameScreenState extends State<GameScreen> {
                           Expanded(
                             child: LinearProgressIndicator(
                               value:
-                                  _gameSession!.metronomeController.currentBeat /
-                                      _gameSession!.musicScore.timeSignature.numerator,
+                                  _gameSession!
+                                      .metronomeController
+                                      .currentBeat /
+                                  _gameSession!
+                                      .musicScore
+                                      .timeSignature
+                                      .numerator,
                               minHeight: 4,
                               borderRadius: BorderRadius.circular(2),
                             ),
@@ -609,8 +654,9 @@ class _GameScreenState extends State<GameScreen> {
                         value: _gameSession!.metronomeController.volume,
                         onChanged: (newVolume) {
                           setState(() {
-                            _gameSession!.metronomeController
-                                .setVolume(newVolume);
+                            _gameSession!.metronomeController.setVolume(
+                              newVolume,
+                            );
                           });
                         },
                         min: 0.0,
@@ -644,7 +690,9 @@ class _GameScreenState extends State<GameScreen> {
                         _updateNoteLayouts(); // recalcular si cambia el ancho
                       }
                       final calculatedWidth = (maxTick * _pixelsPerTick) + 160;
-                      final width = calculatedWidth < minWidth ? minWidth : calculatedWidth;
+                      final width = calculatedWidth < minWidth
+                          ? minWidth
+                          : calculatedWidth;
 
                       return Stack(
                         children: [
@@ -661,58 +709,71 @@ class _GameScreenState extends State<GameScreen> {
                               child: SizedBox(
                                 width: width,
                                 child: RepaintBoundary(
-                                  child: ValueListenableBuilder<List<NoteLayout>>(
-                                    valueListenable: _noteLayoutsNotifier,
-                                    builder: (context, noteLayouts, child) {
-                                      return Stack(
-                                        fit: StackFit.expand,
-                                        children: [
-                                          CustomPaint(
-                                            painter: SMuFLRenderer(
-                                              timeSignature: _loadedScore!.timeSignature,
-                                              keySignature: _loadedScore!.keySignature,
-                                              noteLayouts: noteLayouts,
-                                              animationManager: _animationManager,
-                                              hitLineXOverride: _computeHitLineX(),
-                                              showHitLine: false,
-                                              showStaff: true,
-                                              showNotes: false,
-                                              showBeams: true,
-                                              clefType: ClefType.treble,
-                                              showTimeSignature: true,
-                                              showKeySignature: true,
-                                              showBarLines: true,
-                                              viewportWidth: _currentViewportWidth,
-                                            ),
-                                          ),
-                                          CustomPaint(
-                                            painter: SMuFLRenderer(
-                                              timeSignature: _loadedScore!.timeSignature,
-                                              keySignature: _loadedScore!.keySignature,
-                                              noteLayouts: noteLayouts,
-                                              animationManager: _animationManager,
-                                              hitLineXOverride: _computeHitLineX(),
-                                              showHitLine: false,
-                                              showStaff: false,
-                                              showNotes: true,
-                                              showBeams: false,
-                                              clefType: ClefType.treble,
-                                              showTimeSignature: false,
-                                              showKeySignature: false,
-                                              showBarLines: false,
-                                              scrollOffset: _scrollOffset.value,
-                                              scrollOffsetListenable: _scrollOffset,
-                                              repaint: Listenable.merge([
-                                                _scrollOffset,
-                                                _gameRevision,
-                                              ]),
-                                              viewportWidth: _currentViewportWidth,
-                                            ),
-                                          ),
-                                        ],
-                                      );
-                                    },
-                                  ),
+                                  child:
+                                      ValueListenableBuilder<List<NoteLayout>>(
+                                        valueListenable: _noteLayoutsNotifier,
+                                        builder: (context, noteLayouts, child) {
+                                          return Stack(
+                                            fit: StackFit.expand,
+                                            children: [
+                                              CustomPaint(
+                                                painter: SMuFLRenderer(
+                                                  timeSignature: _loadedScore!
+                                                      .timeSignature,
+                                                  keySignature: _loadedScore!
+                                                      .keySignature,
+                                                  noteLayouts: noteLayouts,
+                                                  animationManager:
+                                                      _animationManager,
+                                                  hitLineXOverride:
+                                                      _computeHitLineX(),
+                                                  showHitLine: false,
+                                                  showStaff: true,
+                                                  showNotes: false,
+                                                  showBeams: true,
+                                                  clefType: ClefType.treble,
+                                                  showTimeSignature: true,
+                                                  showKeySignature: true,
+                                                  showBarLines: true,
+                                                  viewportWidth:
+                                                      _currentViewportWidth,
+                                                ),
+                                              ),
+                                              CustomPaint(
+                                                painter: SMuFLRenderer(
+                                                  timeSignature: _loadedScore!
+                                                      .timeSignature,
+                                                  keySignature: _loadedScore!
+                                                      .keySignature,
+                                                  noteLayouts: noteLayouts,
+                                                  animationManager:
+                                                      _animationManager,
+                                                  hitLineXOverride:
+                                                      _computeHitLineX(),
+                                                  showHitLine: false,
+                                                  showStaff: false,
+                                                  showNotes: true,
+                                                  showBeams: false,
+                                                  clefType: ClefType.treble,
+                                                  showTimeSignature: false,
+                                                  showKeySignature: false,
+                                                  showBarLines: false,
+                                                  scrollOffset:
+                                                      _scrollOffset.value,
+                                                  scrollOffsetListenable:
+                                                      _scrollOffset,
+                                                  repaint: Listenable.merge([
+                                                    _scrollOffset,
+                                                    _gameRevision,
+                                                  ]),
+                                                  viewportWidth:
+                                                      _currentViewportWidth,
+                                                ),
+                                              ),
+                                            ],
+                                          );
+                                        },
+                                      ),
                                 ),
                               ),
                             ),
@@ -758,11 +819,17 @@ class _GameScreenState extends State<GameScreen> {
                                 top: 4,
                                 right: 4,
                                 child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
                                   decoration: BoxDecoration(
                                     color: beatColor.withOpacity(0.15),
                                     borderRadius: BorderRadius.circular(6),
-                                    border: Border.all(color: beatColor.withOpacity(0.5), width: 1),
+                                    border: Border.all(
+                                      color: beatColor.withOpacity(0.5),
+                                      width: 1,
+                                    ),
                                   ),
                                   child: Text(
                                     lastHit?.displayName ?? 'Esperando...',
@@ -783,7 +850,9 @@ class _GameScreenState extends State<GameScreen> {
                               return Positioned(
                                 top: 32,
                                 left: 4,
-                                child: HitHistoryDisplay(history: game.hitHistory),
+                                child: HitHistoryDisplay(
+                                  history: game.hitHistory,
+                                ),
                               );
                             },
                           ),

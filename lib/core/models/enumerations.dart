@@ -244,35 +244,30 @@ enum ExerciseType {
 
 /// Dificultad del ejercicio
 enum Difficulty {
-  beginner,
+  initial,
   intermediate,
-  advanced,
-  expert;
+  advanced;
 
   String get displayName {
     switch (this) {
-      case Difficulty.beginner:
-        return 'Principiante';
+      case Difficulty.initial:
+        return 'Inicial';
       case Difficulty.intermediate:
         return 'Intermedio';
       case Difficulty.advanced:
         return 'Avanzado';
-      case Difficulty.expert:
-        return 'Experto';
     }
   }
 
   /// BPM recomendado para esta dificultad
   int get recommendedBPM {
     switch (this) {
-      case Difficulty.beginner:
+      case Difficulty.initial:
         return 60;
       case Difficulty.intermediate:
         return 90;
       case Difficulty.advanced:
         return 120;
-      case Difficulty.expert:
-        return 150;
     }
   }
 }

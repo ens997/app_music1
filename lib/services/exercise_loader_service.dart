@@ -4,8 +4,9 @@ import 'package:flutter/material.dart';
 import '../core/core.dart';
 
 class ExerciseLoaderService {
-  static const String _exercisesFolder = 'assets/exercises';
-  static const String _manifestFile = '$_exercisesFolder/exercises_manifest.json';
+  static const String _exercisesFolder = 'assets/exercises/';
+  static final RegExp _numericMusicXml =
+      RegExp(r'^\d+\.(?:musicxml|xml)$', caseSensitive: false);
 
   final List<Exercise> _exercises = [];
   final Map<String, Exercise> _exerciseMap = {};
@@ -14,24 +15,20 @@ class ExerciseLoaderService {
 
   Future<List<Exercise>> loadExercises() async {
     try {
-      String manifestJson;
-      try {
-        manifestJson = await rootBundle.loadString(_manifestFile);
-      } catch (e) {
-        debugPrint('⚠️ Manifiesto no encontrado: $_manifestFile');
-        return [];
-      }
-
-      final manifest = jsonDecode(manifestJson) as Map<String, dynamic>;
-      final exercisesList = manifest['exercises'] as List<dynamic>;
+      final allAssetPaths = await _loadAllAssetPaths();
+      final assetPaths = allAssetPaths
+          .where((path) => path.startsWith(_exercisesFolder))
+          .where(_isNumericMusicXml)
+          .toList()
+        ..sort();
 
       _exercises.clear();
       _exerciseMap.clear();
       _exercisesByDifficulty.clear();
       _exercisesByType.clear();
 
-      for (final exerciseData in exercisesList) {
-        final exercise = _parseExercise(exerciseData as Map<String, dynamic>);
+      for (final assetPath in assetPaths) {
+        final exercise = _parseExercise(assetPath);
         _exercises.add(exercise);
         _exerciseMap[exercise.id] = exercise;
 
@@ -50,23 +47,24 @@ class ExerciseLoaderService {
     }
   }
 
-  Exercise _parseExercise(Map<String, dynamic> data) {
-    final difficultyStr = data['difficulty'] as String? ?? 'beginner';
-    final typeStr = data['type'] as String? ?? 'rhythmTraining';
-    final durationSec = data['estimatedDuration'] as int? ?? 120;
+  Exercise _parseExercise(String assetPath) {
+    final pathParts = assetPath.split('/');
+    final level = pathParts[pathParts.length - 2];
+    final fileName = pathParts.last;
+    final exerciseNumber = fileName.split('.').first;
 
     return Exercise(
-      id: data['id'] as String? ?? '',
-      title: data['title'] as String? ?? 'Sin título',
-      description: data['description'] as String? ?? '',
-      fileName: data['fileName'] as String? ?? '',
-      assetPath: '$_exercisesFolder/${data['path'] as String? ?? ''}',
-      difficulty: _parseDifficulty(difficultyStr),
-      type: _parseExerciseType(typeStr),
-      composer: data['composer'] as String? ?? 'Unknown',
-      bpm: data['bpm'] as int? ?? 120,
-      estimatedDuration: Duration(seconds: durationSec),
-      tags: (data['tags'] as List<dynamic>?)?.map((e) => e as String).toList() ?? [],
+      id: '$level-$exerciseNumber',
+      title: 'Ejercicio $exerciseNumber',
+      description: 'Ejercicio MusicXML del nivel ${_parseDifficulty(level).displayName}.',
+      fileName: fileName,
+      assetPath: assetPath,
+      difficulty: _parseDifficulty(level),
+      type: ExerciseType.rhythmTraining,
+      composer: 'Ejercicio Musical',
+      bpm: 120,
+      estimatedDuration: const Duration(minutes: 2),
+      tags: const [],
       isFavorite: false,
       timesCompleted: 0,
       bestScore: 0,
@@ -75,17 +73,43 @@ class ExerciseLoaderService {
 
   Difficulty _parseDifficulty(String value) {
     switch (value.toLowerCase()) {
-      case 'beginner':
-        return Difficulty.beginner;
+      case 'inicial':
+        return Difficulty.initial;
+      case 'intermedio':
       case 'intermediate':
         return Difficulty.intermediate;
+      case 'avanzado':
       case 'advanced':
         return Difficulty.advanced;
-      case 'expert':
-        return Difficulty.expert;
       default:
-        return Difficulty.beginner;
+        throw FormatException('Nivel de ejercicios no soportado: $value');
     }
+  }
+
+  /// Lee el listado de assets soportando tanto el manifiesto binario
+  /// (AssetManifest.bin, usado por SDKs recientes) como el JSON legado.
+  Future<List<String>> _loadAllAssetPaths() async {
+    try {
+      final data = await rootBundle.load('AssetManifest.bin');
+      final decoded = const StandardMessageCodec().decodeMessage(data);
+      if (decoded is Map) {
+        return decoded.keys.map((key) => key.toString()).toList();
+      }
+    } catch (_) {
+      // Ignorado: se intentará con el manifiesto JSON legado.
+    }
+
+    try {
+      final manifestJson = await rootBundle.loadString('AssetManifest.json');
+      final assetManifest = jsonDecode(manifestJson) as Map<String, dynamic>;
+      return assetManifest.keys.toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  bool _isNumericMusicXml(String path) {
+    return _numericMusicXml.hasMatch(path.split('/').last);
   }
 
   ExerciseType _parseExerciseType(String value) {

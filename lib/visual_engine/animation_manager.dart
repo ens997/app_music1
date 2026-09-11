@@ -1,89 +1,58 @@
 import 'package:flutter/material.dart';
-import 'dart:math' as math;
 import '../core/core.dart';
+
+/// Nivel de acierto simplificado para el feedback visual de las notas.
+/// Perfecto: verde, buena (great/good): amarillo, mala (miss o tono
+/// incorrecto): rojo.
+enum FeedbackTier {
+  perfect,
+  good,
+  miss;
+
+  static FeedbackTier fromHit(HitQuality quality, bool isCorrectPitch) {
+    if (!isCorrectPitch || quality == HitQuality.miss) return FeedbackTier.miss;
+    if (quality == HitQuality.perfect) return FeedbackTier.perfect;
+    return FeedbackTier.good;
+  }
+
+  Color get color {
+    switch (this) {
+      case FeedbackTier.perfect:
+        return const Color(0xFF4CAF50); // Verde
+      case FeedbackTier.good:
+        return const Color(0xFFFFC107); // Amarillo
+      case FeedbackTier.miss:
+        return const Color(0xFFE94560); // Rojo
+    }
+  }
+}
 
 /// Gestor centralizado de animaciones de feedback visual
 class AnimationManager {
-  final List<HitFeedbackAnimation> feedbackAnimations = [];
-  final List<ComboAnimation> comboAnimations = [];
-  final List<AccuracyAnimation> accuracyAnimations = [];
+  // Límite defensivo: evita crecimiento sin control si el usuario acierta
+  // notas más rápido de lo que las animaciones tardan en desvanecerse.
+  static const int _maxConcurrentFeedback = 8;
 
-  void addHitFeedback(Offset position, HitQuality quality) {
+  final List<HitFeedbackAnimation> feedbackAnimations = [];
+
+  void addHitFeedback(Offset position, FeedbackTier tier) {
+    if (feedbackAnimations.length >= _maxConcurrentFeedback) {
+      feedbackAnimations.removeAt(0);
+    }
     feedbackAnimations.add(
       HitFeedbackAnimation(
         position: position,
-        quality: quality,
+        tier: tier,
         startTime: DateTime.now(),
-        duration: const Duration(milliseconds: 800),
       ),
     );
-  }
-
-  void addComboAnimation(Offset position, int combo) {
-    if (combo >= 5) {
-      comboAnimations.add(
-        ComboAnimation(
-          position: position,
-          text: 'Combo x$combo',
-          startTime: DateTime.now(),
-          duration: const Duration(milliseconds: 1000),
-        ),
-      );
-    }
-  }
-
-  void addAccuracyAnimation(
-    Offset position,
-    HitQuality quality,
-    int deviationTicks,
-  ) {
-    accuracyAnimations.add(
-      AccuracyAnimation(
-        position: position,
-        text: _getQualityText(quality, deviationTicks),
-        quality: quality,
-        startTime: DateTime.now(),
-        duration: const Duration(milliseconds: 1200),
-      ),
-    );
-  }
-
-  void updateAnimations() {
-    final now = DateTime.now();
-    feedbackAnimations.removeWhere((anim) {
-      anim.update(now);
-      return anim.isComplete();
-    });
-    comboAnimations.removeWhere((anim) {
-      anim.update(now);
-      return anim.isComplete();
-    });
-    accuracyAnimations.removeWhere((anim) {
-      anim.update(now);
-      return anim.isComplete();
-    });
   }
 
   void updateAndDraw(Canvas canvas, Size size) {
     final now = DateTime.now();
-
     feedbackAnimations.removeWhere((anim) {
       anim.update(now);
-      if (anim.isComplete()) return true;
-      anim.draw(canvas);
-      return false;
-    });
-
-    comboAnimations.removeWhere((anim) {
-      anim.update(now);
-      if (anim.isComplete()) return true;
-      anim.draw(canvas);
-      return false;
-    });
-
-    accuracyAnimations.removeWhere((anim) {
-      anim.update(now);
-      if (anim.isComplete()) return true;
+      if (anim.isComplete(now)) return true;
       anim.draw(canvas);
       return false;
     });
@@ -91,176 +60,49 @@ class AnimationManager {
 
   void clearAll() {
     feedbackAnimations.clear();
-    comboAnimations.clear();
-    accuracyAnimations.clear();
-  }
-
-  String _getQualityText(HitQuality quality, int deviationTicks) {
-    return '${quality.displayName} (${deviationTicks.abs()}ms)';
   }
 }
 
 // ============================================================
-// CLASES DE ANIMACIÓN (con TextPainter cacheado)
+// ANIMACIÓN DE FEEDBACK (pulso minimalista de un solo color)
 // ============================================================
 
-/// Animación de feedback de hit (radiante expandible)
+/// Pulso breve y minimalista en el punto de impacto de la nota.
+/// Un único círculo relleno que crece y se desvanece; sin texto ni
+/// trazos múltiples, para mantener el costo de dibujo al mínimo.
 class HitFeedbackAnimation {
   final Offset position;
-  final HitQuality quality;
+  final FeedbackTier tier;
   final DateTime startTime;
-  final Duration duration;
-  late double maxRadius;
-  late double currentRadius;
-  late double opacity;
+  static const Duration _duration = Duration(milliseconds: 260);
+  static const double _maxRadius = 22.0;
 
-  // Pincel estático (se reutiliza)
-  static final Paint _circlePaint = Paint()
-    ..style = PaintingStyle.stroke
-    ..strokeWidth = 3.0;
+  double _radius = 0.0;
+  double _opacity = 1.0;
+
+  // Pincel estático reutilizado entre instancias (sin allocations por frame).
+  static final Paint _fillPaint = Paint()..style = PaintingStyle.fill;
 
   HitFeedbackAnimation({
     required this.position,
-    required this.quality,
+    required this.tier,
     required this.startTime,
-    required this.duration,
-  }) {
-    maxRadius = 60.0;
-  }
-
-  void update(DateTime now) {
-    final elapsed = now.difference(startTime);
-    final progress = (elapsed.inMilliseconds / duration.inMilliseconds)
-        .clamp(0.0, 1.0);
-    currentRadius = maxRadius * progress;
-    opacity = 1.0 - progress;
-  }
-
-  bool isComplete() {
-    return DateTime.now().difference(startTime) >= duration;
-  }
-
-  void draw(Canvas canvas) {
-    final color = Color(quality.colorValue).withOpacity(opacity);
-    _circlePaint.color = color;
-    canvas.drawCircle(position, currentRadius, _circlePaint);
-
-    // Puntos radiantes
-    for (int i = 0; i < 8; i++) {
-      final angle = (i * 2 * math.pi) / 8;
-      final pointX = position.dx + math.cos(angle) * currentRadius;
-      final pointY = position.dy + math.sin(angle) * currentRadius;
-      canvas.drawCircle(
-        Offset(pointX, pointY),
-        2.0,
-        _circlePaint..color = color,
-      );
-    }
-  }
-}
-
-/// Animación de combo
-class ComboAnimation {
-  final Offset position;
-  final String text;
-  final DateTime startTime;
-  final Duration duration;
-  late double opacity;
-  late double scaleTransform;
-  late Offset yOffset;
-
-  // TextPainter cacheado
-  final TextPainter _painter = TextPainter(
-    textDirection: TextDirection.ltr,
-  );
-
-  ComboAnimation({
-    required this.position,
-    required this.text,
-    required this.startTime,
-    required this.duration,
   });
 
   void update(DateTime now) {
-    final elapsed = now.difference(startTime);
-    final progress = (elapsed.inMilliseconds / duration.inMilliseconds)
-        .clamp(0.0, 1.0);
-    opacity = 1.0 - progress;
-    scaleTransform = 1.0 + progress * 0.3;
-    yOffset = Offset(0, -progress * 50);
+    final elapsed = now.difference(startTime).inMilliseconds;
+    final progress = (elapsed / _duration.inMilliseconds).clamp(0.0, 1.0);
+    // Crecimiento rápido (ease-out) seguido de desvanecimiento lineal.
+    _radius = _maxRadius * (1 - (1 - progress) * (1 - progress));
+    _opacity = 1.0 - progress;
   }
 
-  bool isComplete() {
-    return DateTime.now().difference(startTime) >= duration;
-  }
-
-  void draw(Canvas canvas) {
-    _painter.text = TextSpan(
-      text: text,
-      style: TextStyle(
-        fontSize: 28 * scaleTransform,
-        fontWeight: FontWeight.bold,
-        color: Colors.amber.withOpacity(opacity),
-      ),
-    );
-    _painter.layout();
-    final finalPos = Offset(
-      position.dx + yOffset.dx - _painter.width / 2,
-      position.dy + yOffset.dy - _painter.height / 2,
-    );
-    _painter.paint(canvas, finalPos);
-  }
-}
-
-/// Animación de precisión del hit
-class AccuracyAnimation {
-  final Offset position;
-  final String text;
-  final HitQuality quality;
-  final DateTime startTime;
-  final Duration duration;
-  late double opacity;
-  late double yOffset;
-
-  // TextPainter cacheado
-  final TextPainter _painter = TextPainter(
-    textDirection: TextDirection.ltr,
-  );
-
-  AccuracyAnimation({
-    required this.position,
-    required this.text,
-    required this.quality,
-    required this.startTime,
-    required this.duration,
-  });
-
-  void update(DateTime now) {
-    final elapsed = now.difference(startTime);
-    final progress = (elapsed.inMilliseconds / duration.inMilliseconds)
-        .clamp(0.0, 1.0);
-    opacity = 1.0 - progress;
-    yOffset = -progress * 40;
-  }
-
-  bool isComplete() {
-    return DateTime.now().difference(startTime) >= duration;
+  bool isComplete(DateTime now) {
+    return now.difference(startTime) >= _duration;
   }
 
   void draw(Canvas canvas) {
-    _painter.text = TextSpan(
-      text: text,
-      style: TextStyle(
-        fontSize: 18,
-        fontWeight: FontWeight.w600,
-        color: Color(quality.colorValue).withOpacity(opacity),
-      ),
-    );
-    _painter.layout();
-    final finalPos = Offset(
-      position.dx - _painter.width / 2,
-      position.dy + yOffset,
-    );
-    _painter.paint(canvas, finalPos);
+    _fillPaint.color = tier.color.withOpacity(_opacity * 0.55);
+    canvas.drawCircle(position, _radius, _fillPaint);
   }
 }

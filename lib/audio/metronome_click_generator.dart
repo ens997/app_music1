@@ -1,14 +1,12 @@
 import 'dart:typed_data';
 import 'dart:math' as math;
 
-/// Generador de clicks de metrónomo con percusión pura y seca.
-/// Crea ondas WAV sintéticas de golpes sin ningún carácter tonal.
+/// Generador de clicks de metronomo con percusion seca.
 class MetronomeClickGenerator {
-  /// Genera un click de metrónomo (golpe seco y suave, sin nota).
-  /// isAccent: true para click de acento (más fuerte), false para click normal.
+  /// Genera un click de metronomo (golpe seco y suave, sin nota).
+  /// isAccent: true para click de acento, false para click normal.
   /// Retorna un Uint8List con el audio WAV del click.
   static Uint8List buildClick({required bool isAccent, int sampleRate = 44100}) {
-    // Duración del click: golpe muy corto
     final durationMs = isAccent ? 70 : 50;
     final totalSamples = (sampleRate * durationMs / 1000).round();
     final byteRate = sampleRate * 2;
@@ -21,7 +19,6 @@ class MetronomeClickGenerator {
       }
     }
 
-    // Encabezado WAV
     writeString(0, 'RIFF');
     buffer.setUint32(4, 36 + dataSize, Endian.little);
     writeString(8, 'WAVE');
@@ -36,57 +33,51 @@ class MetronomeClickGenerator {
     writeString(36, 'data');
     buffer.setUint32(40, dataSize, Endian.little);
 
-    // Generar click percusivo puro (sin contenido tonal)
-    // Attack ultra-rápido (< 0.5ms) + decay rápido
-    final attackSamples = (sampleRate * 0.0003).round(); // 0.3ms
-    final decayRateFast = isAccent ? 35.0 : 40.0; // Decay exponencial rápido
+    // Knock-style click: short inharmonic resonances with minimal attack noise.
+    final attackSamples = (sampleRate * 0.0010).round(); // 1.0ms
+    final bodyDecay = isAccent ? 42.0 : 48.0;
+    final tapDecay = isAccent ? 96.0 : 112.0;
+    final highDecay = isAccent ? 150.0 : 170.0;
+    final lowMode = isAccent ? 176.0 : 154.0;
+    final woodMode = isAccent ? 319.0 : 287.0;
+    final knockMode = isAccent ? 673.0 : 607.0;
+    final shellMode = isAccent ? 1237.0 : 1093.0;
 
-    final random = math.Random(12345); // Seed fijo para consistencia
+    final random = math.Random(12345);
 
     for (int i = 0; i < totalSamples; i++) {
-      // Envolvente: attack lineal rápido + decay exponencial
       double env;
       if (i < attackSamples) {
-        // Attack: sube muy rápido
-        env = (i / attackSamples);
+        env = i / attackSamples;
       } else {
-        // Decay: cae exponencialmente (golpe seco)
         final decayTime = (i - attackSamples) / sampleRate;
-        env = math.exp(-decayRateFast * decayTime);
+        env = math.exp(-bodyDecay * decayTime);
       }
 
-      // Generar ruido pseudo-aleatorio (no tonal)
-      // Mezclar componentes de diferentes rangos de frecuencia
-      final noise1 = (random.nextDouble() * 2.0 - 1.0); // Ruido blanco puro
-      final noise2 = _generateFilteredNoise(i, sampleRate, random, 3000.0); // Componente mid-high
+      final t = i / sampleRate;
+      final low = math.sin(2.0 * math.pi * lowMode * t) *
+          math.exp(-bodyDecay * t) *
+          0.26;
+      final wood = math.sin((2.0 * math.pi * woodMode * t) + 0.71) *
+          math.exp(-tapDecay * t) *
+          0.34;
+      final knock = math.sin((2.0 * math.pi * knockMode * t) + 1.83) *
+          math.exp(-tapDecay * 1.35 * t) *
+          0.28;
+      final shell = math.sin((2.0 * math.pi * shellMode * t) + 2.47) *
+          math.exp(-highDecay * t) *
+          0.12;
+      final attackNoise = (random.nextDouble() * 2.0 - 1.0) *
+          math.exp(-230.0 * t) *
+          0.025;
 
-      // Combinar ruidos para golpe seco
-      final sample = (noise1 * 0.6 + noise2 * 0.4) * env;
-
-      // Amplitud final: acento más fuerte
-      final amplitude = isAccent ? 0.65 : 0.42;
-      final intSample = (sample * amplitude * 32767).round().clamp(-32768, 32767);
+      final sample = ((low + wood) * env) + knock + shell + attackNoise;
+      final amplitude = isAccent ? 0.82 : 0.56;
+      final intSample =
+          (sample * amplitude * 32767).round().clamp(-32768, 32767);
       buffer.setInt16(44 + (i * 2), intSample, Endian.little);
     }
 
     return buffer.buffer.asUint8List();
-  }
-
-  /// Genera ruido filtrado simple usando recursión de primer orden.
-  /// Crea un componente de ruido más controlado sin tonalidad.
-  static double _generateFilteredNoise(
-    int sampleIndex,
-    int sampleRate,
-    math.Random random,
-    double filterFreq,
-  ) {
-    // Simple low-pass filter simulado mediante promedios
-    // Esto reduce la aleatoriedad pura a ruido más "suave"
-    final alpha = 2.0 * math.pi * filterFreq / sampleRate;
-    final clampedAlpha = alpha.clamp(0.0, 1.0);
-
-    // Generar ruido y aplicar factor de suavizado
-    final rawNoise = random.nextDouble() * 2.0 - 1.0;
-    return rawNoise * clampedAlpha;
   }
 }

@@ -28,6 +28,8 @@ class GameSession {
   final List<void Function(GameState)> _stateListeners = [];
   final List<void Function()> _scoreListeners = [];
   final List<void Function()> _noteHitListeners = [];
+  final List<void Function(int noteIndex, HitQuality quality, bool isCorrectPitch)>
+      _noteFeedbackListeners = [];
 
   // Getter para el estado actual
   GameState get state => _state;
@@ -182,6 +184,7 @@ class GameSession {
       _currentCombo = 0;
       _hitHistory.add(HitQuality.miss);
       _notifyNoteHit();
+      _notifyNoteFeedback(closestIndex, HitQuality.miss, isCorrectPitch);
       if (_nextPlayablePosition >= _playableNoteIndices.length) {
         finish();
       }
@@ -214,6 +217,7 @@ class GameSession {
     // 5. Notificar a los listeners
     _notifyScoreChanged();
     _notifyNoteHit();
+    _notifyNoteFeedback(closestIndex, quality, isCorrectPitch);
 
     // 6. Si todas las notas han sido procesadas, finalizar
     if (_nextPlayablePosition >= _playableNoteIndices.length) {
@@ -266,6 +270,12 @@ class GameSession {
   void _notifyNoteHit() {
     for (var listener in _noteHitListeners) {
       listener();
+    }
+  }
+
+  void _notifyNoteFeedback(int noteIndex, HitQuality quality, bool isCorrectPitch) {
+    for (var listener in _noteFeedbackListeners) {
+      listener(noteIndex, quality, isCorrectPitch);
     }
   }
 
@@ -337,6 +347,14 @@ class GameSession {
     _noteHitListeners.add(callback);
   }
 
+  /// Notifica el resultado de cada golpe (índice, calidad y acierto de tono)
+  /// para alimentar feedback visual inmediato sin acoplar GameSession a la UI.
+  void onNoteFeedback(
+      void Function(int noteIndex, HitQuality quality, bool isCorrectPitch)
+          callback) {
+    _noteFeedbackListeners.add(callback);
+  }
+
   void removeStateListener(void Function(GameState) callback) {
     _stateListeners.remove(callback);
   }
@@ -347,6 +365,12 @@ class GameSession {
 
   void removeNoteHitListener(void Function() callback) {
     _noteHitListeners.remove(callback);
+  }
+
+  void removeNoteFeedbackListener(
+      void Function(int noteIndex, HitQuality quality, bool isCorrectPitch)
+          callback) {
+    _noteFeedbackListeners.remove(callback);
   }
 
   // ============================================================

@@ -33,12 +33,11 @@ flutter:
     # - assets/sample.musicxml
     - musicxml_preload/
     
-    # Carpeta de ejercicios (con sus subcarpetas)
+    # Ejercicios numerados organizados por nivel
     - assets/exercises/
-    - assets/exercises/beginner/
-    - assets/exercises/intermediate/
-    - assets/exercises/advanced/
-    - assets/exercises/exercises_manifest.json
+    - assets/exercises/inicial/
+    - assets/exercises/intermedio/
+    - assets/exercises/avanzado/
 
   fonts:
     - family: Bravura
