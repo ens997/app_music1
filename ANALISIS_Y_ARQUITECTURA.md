@@ -1,263 +1,172 @@
-# Análisis del Prototipo y Arquitectura Flutter para App de Enseñanza Musical
+# Análisis y arquitectura del proyecto actual
 
-## 📋 ANÁLISIS DEL PROTOTIPO HTML
+## Estado actual del proyecto
 
-### Concepto General
-**"Entrenador Rítmico Pro - Sistema de Anacrusa"** es una aplicación interactiva educativa que:
-- Entrena sincronización rítmica mediante notas visuales que viajan por la pantalla
-- Mide precisión con ventanas de hit (Perfect, Great, Good)
-- Utiliza un **sistema de anacrusa** para sincronizar el metrónomo con la llegada de notas
-- Soporta múltiples métricas (4/4, 3/4, 2/4)
-- Control dinámico de tempo (60-180 BPM)
+Este proyecto ya no es solo un prototipo conceptual ni una propuesta de arquitectura. La base funcional de la aplicación musical ya está implementada en Flutter y se organiza en capas bien definidas.
 
-### Componentes Principales del Prototipo
+## Objetivo del sistema
 
-#### 1️⃣ **ProfessionalRhythmEngine** (Motor de Lógica Musical)
-Gestiona:
-- **Timing**: BPM, Beat Duration, Measure Duration
-- **Time Signatures**: Métricas (numerador/denominador)
-- **Hit Windows**: Ventanas de precisión temporal
-  ```
-  Perfect: ±50ms
-  Great:   ±100ms
-  Good:    ±150ms
-  Miss:    >150ms
-  ```
-- **Anacrusa (Pickup)**: Sistema para sincronizar metrónomo
-  ```
-  Cálculo: beats_anacrusa = (medida - (travelBeats % medida)) % medida
-  Ejemplo: 3/4 con 8 beats de viaje → 8 % 3 = 2 → anacrusa = 2 beats
-  ```
-- **Note Sequencing**: Generación de secuencias con timing exacto
-- **Scoring**: Puntuación, combo, accuracy
+La aplicación funciona como entrenador musical orientado a:
 
-#### 2️⃣ **CanvasRenderer** (Sistema Visual)
-Renderiza:
-- Pentagrama (5 líneas + espacios)
-- Clave de Sol
-- Indicación de compás
-- Notas musicales (blancas, negras, con punto)
-- Línea roja de "hit" (target line)
-- Animaciones de feedback (radiantes, combo, precisión)
+- cargar ejercicios desde archivos MusicXML
+- evaluar precisión en tiempo y altura
+- renderizar pentagramas y notas visualmente
+- reproducir metrónomo y audio de piano
+- gestionar flujo de juego, puntuación y feedback
 
-#### 3️⃣ **Audio System**
-- Metrónomo con acentos (beat 1 más fuerte)
-- Sonidos de notas (síntesis de audio Web Audio API)
-- Control de volumen
+## Arquitectura real implementada
 
----
+### Capa 1: UI
+La interfaz se encuentra en el directorio [lib/screens](lib/screens), con pantallas principales como:
 
-## 🏗️ ARQUITECTURA PROPUESTA PARA FLUTTER
+- `HomeScreen`
+- `ExerciseSelectionScreen`
+- `GameScreen`
+- `SettingsScreen`
+- `ResultsScreen`
 
-### Separación de Sistemas
+La aplicación principal se inicia en [lib/main.dart](lib/main.dart), donde se monta el árbol de widgets y se inicializa el provider de ejercicios.
 
-```
-┌─────────────────────────────────────────────────────┐
-│               APLICACIÓN FLUTTER                     │
-├─────────────────────────────────────────────────────┤
-│                                                      │
-│  ┌──────────────────────────────────────────────┐   │
-│  │   UI Layer (Widgets Flutter)                 │   │
-│  │  - GameScreen, SettingsScreen, etc.         │   │
-│  └──────────────┬───────────────────────────────┘   │
-│                 │                                   │
-│  ┌──────────────────────────┐  ┌────────────────┐  │
-│  │ VISUAL ENGINE (SMuFL)    │  │ MUSICAL ENGINE │  │
-│  │──────────────────────────│  │ (TPQN 480)     │  │
-│  │ - SMuFLRenderer          │  │────────────────│  │
-│  │ - StaffRenderer          │  │ - TicksEngine  │  │
-│  │ - NoteVisual             │  │ - TimeSignature│  │
-│  │ - AnimationManager       │  │ - NoteModel    │  │
-│  │ - FeedbackAnimations     │  │ - TempoCalc    │  │
-│  └──────────────┬───────────┘  │ - PickupCalc   │  │
-│                 │              │ - HitWindow    │  │
-│                 │              └────────┬────────┘  │
-│                 │                       │           │
-│  ┌──────────────────────────────────────┴────────┐  │
-│  │   Game Logic Orchestration                     │  │
-│  │  - GameSession (orquesta todo)                │  │
-│  │  - ScoreEngine                                │  │
-│  │  - MetronomeController                        │  │
-│  │  - InputHandler                               │  │
-│  └──────────────┬─────────────────────────────────┘  │
-│                 │                                   │
-│  ┌──────────────────────────────────────────────┐   │
-│  │  MusicXML Parser & Data Layer                │   │
-│  │  - MusicXMLParser                            │   │
-│  │  - PartHandler, MeasureHandler               │   │
-│  │  - NoteExtractor → Internal Format           │   │
-│  └──────────────────────────────────────────────┘   │
-│                                                      │
-└─────────────────────────────────────────────────────┘
-```
+### Capa 2: Providers / Estado global
+El estado principal del flujo de ejercicios está gestionado por [lib/providers/exercise_provider.dart](lib/providers/exercise_provider.dart).
 
----
+Responsabilidades actuales:
 
-## 📊 SYSTEM 1: MUSICAL LOGIC ENGINE (Basado en TPQN 480)
+- cargar ejercicios desde assets
+- exponer la lista de ejercicios disponibles
+- indicar estado de carga y errores
+- seleccionar un ejercicio activo
+- devolver estadísticas calculadas
 
-### Concepto: Ticks Per Quarter Note (TPQN)
-Standard en MIDI y MusicXML. **1 Quarter Note = 480 Ticks**
+### Capa 3: Dominio musical (core)
+El dominio musical está en [lib/core](lib/core), reagrupado en:
 
-### Conversiones Fundamentales
-```dart
-const TPQN = 480;  // Ticks per Quarter Note (estándar MIDI)
+- modelos de nota, compás, armadura y ejercicio
+- motor musical con lógica temporal y de puntuación
+- utilidades de cálculo del gameplay
 
-// Duraciones base
-const TICKS_WHOLE = 1920;      // 4 × 480
-const TICKS_HALF = 960;        // 2 × 480
-const TICKS_QUARTER = 480;     // 1 × 480
-const TICKS_EIGHTH = 240;      // 0.5 × 480
-const TICKS_SIXTEENTH = 120;   // 0.25 × 480
+Archivos clave:
 
-// Duración con punto (1.5×)
-const TICKS_DOTTED_HALF = 1440;      // 960 × 1.5
-const TICKS_DOTTED_QUARTER = 720;    // 480 × 1.5
+- [lib/core/models/note_model.dart](lib/core/models/note_model.dart)
+- [lib/core/models/time_signature.dart](lib/core/models/time_signature.dart)
+- [lib/core/models/key_signature.dart](lib/core/models/key_signature.dart)
+- [lib/core/musical_engine/ticks_engine.dart](lib/core/musical_engine/ticks_engine.dart)
+- [lib/core/musical_engine/pickup_calculator.dart](lib/core/musical_engine/pickup_calculator.dart)
+- [lib/core/musical_engine/hit_window.dart](lib/core/musical_engine/hit_window.dart)
 
-// Conversión BPM → Milliseconds
-milliseconds = (TICKS_QUARTER / bpm) * 1000 / 60
-             = (480 / 120) * 1000 / 60
-             = 500 ms (para 120 BPM)
-```
+Estas clases representan el núcleo del sistema de ritmo y evaluación.
 
-### Estructura de Clases
+### Capa 4: Motor de juego
+La lógica del juego se centraliza en [lib/game/game_session.dart](lib/game/game_session.dart).
 
-#### 1. **TicksEngine** (Core Temporal)
-```dart
-class TicksEngine {
-  final int tpqn = 480;
-  late int currentTick;
-  late int bpm;
-  
-  int getNoteTickDuration(NoteDuration duration) {
-    // Retorna la duración en TPQN
-  }
-  
-  int calculateTicksPerMeasure(TimeSignature ts) {
-    // 4/4 → 1920 ticks (4 × 480)
-    // 3/4 → 1440 ticks (3 × 480)
-  }
-  
-  Duration ticksToMilliseconds(int ticks) {
-    // Convierte ticks a tiempo real considerando BPM
-  }
-}
+`GameSession` es el orquestador del juego y gestiona:
+
+- estado del juego (`idle`, `playing`, `paused`, `finished`)
+- validación de hits por tiempo
+- comparación de pitch
+- combo y puntuación
+- historial de feedback
+- notificación a la UI de cambios relevantes
+
+También se usa [lib/game/metronome_controller.dart](lib/game/metronome_controller.dart) para controlar el pulso del ejercicio.
+
+### Capa 5: Parser MusicXML
+El parseo del contenido musical se hace en [lib/parsers/musicxml_parser.dart](lib/parsers/musicxml_parser.dart).
+
+Responsabilidades actuales:
+
+- leer XML de MusicXML
+- detectar compás, tonalidad y BPM
+- convertir notas en objetos internos
+- calcular duración en ticks
+- soportar rest, alteraciones y tipos de nota
+
+Esto permite que la resta del sistema trabaje con un modelo propio en lugar de depender directamente del formato externo.
+
+### Capa 6: Visual Engine
+El render gráfico se encuentra en [lib/visual_engine](lib/visual_engine).
+
+Elementos principales:
+
+- `SMuFLRenderer`
+- `StaffRenderer`
+- `NoteVisual`
+- `AnimationManager`
+- `NoteLayout`
+
+Se encarga de dibujar:
+
+- el pentagrama
+- notas y silencios
+- líneas de hit
+- feedback visual por precisión
+- animaciones de notas y aciertos
+
+### Capa 7: Audio
+En [lib/audio](lib/audio) se implementa la parte sonora:
+
+- metrónomo
+- generación de clicks
+- servicio para notas de piano
+- control del audio asociado a la sesión de juego
+
+### Capa 8: Servicios y carga de datos
+Los servicios se ubican en [lib/services](lib/services), sobre todo:
+
+- `ExerciseLoaderService`: carga ejercicios desde `assets/exercises`
+- `MusicXmlPreloadService`: apoyo para precarga de archivos XML
+
+## Relación entre módulos
+
+La relación actual del sistema es la siguiente:
+
+```text
+UI / Screens
+    ↓
+Providers
+    ↓
+GameSession / Core / Musical Logic
+    ↓
+MusicXMLParser
+    ↓
+Visual Engine + Audio
 ```
 
-#### 2. **TimeSignature**
-```dart
-class TimeSignature {
-  final int numerator;    // Beats por compás (arriba)
-  final int denominator;  // Tipo de figura (abajo)
-  
-  int getTicksPerMeasure(int tpqn) {
-    // BPM 120: 4/4 = 2000ms, 3/4 = 1500ms
-  }
-  
-  bool needsPickup(int travelTicks) {
-    // Calcula si necesita anacrusa
-    return (travelTicks % getTicksPerMeasure(tpqn)) != 0;
-  }
-}
-```
+Es decir, la pantalla dispara acciones y observa cambios de estado; el `GameSession` resuelve la lógica; el parser convierte el contenido musical; y las capas visual y de audio se encargan de la representación y sonido.
 
-#### 3. **NoteModel**
-```dart
-class NoteModel {
-  final String pitch;           // "C4", "D#5", etc.
-  final NoteDuration duration;  // whole, half, quarter, eighth
-  final int absoluteTick;       // Posición absoluta en TPQN
-  final int durationTicks;      // Duración en TPQN
-  
-  int getFrequency() => noteToFrequency(pitch);
-  bool isDotted() => duration.isDotted;
-}
-```
+## Principios arquitectónicos observados
 
-#### 4. **PickupCalculator**
-```dart
-class PickupCalculator {
-  static int calculatePickupTicks(
-    int travelTicks,
-    int ticksPerMeasure,
-  ) {
-    int remainder = travelTicks % ticksPerMeasure;
-    if (remainder == 0) return 0;
-    return ticksPerMeasure - remainder;
-  }
-  
-  // Para 3/4 con 8 beats (3840 ticks):
-  // 3840 % 1440 = 720 ticks (1.5 beats)
-  // anacrusa = 1440 - 720 = 720 ticks (1.5 beats)
-}
-```
+La solución actual ya muestra una estructura bastante coherente:
 
-#### 5. **HitWindow & Scoring**
-```dart
-class HitWindow {
-  final int perfect = 48;    // 100ms a 120 BPM
-  final int great = 96;      // 200ms a 120 BPM
-  final int good = 144;      // 300ms a 120 BPM
-  
-  HitQuality getQuality(int deviationTicks) {
-    if (deviationTicks.abs() <= perfect) return Perfect;
-    if (deviationTicks.abs() <= great) return Great;
-    if (deviationTicks.abs() <= good) return Good;
-    return Miss;
-  }
-}
-```
+- separación entre dominio y presentación
+- desacople del formato externo (MusicXML) del resto del código
+- independencia del motor visual respecto a la lógica del juego
+- un punto de orquestación único: `GameSession`
+- división clara entre audio, render y evaluación
 
----
+## Fortalezas del proyecto actual
 
-## 🎨 SYSTEM 2: VISUAL ENGINE (SMuFL - Standard Music Font Layout)
+- el modelo de dominio está bien definido
+- el flujo de ejercicios está integrado con assets y selección de pantalla
+- la lógica de evaluación está centralizada
+- el render del pentagrama y la animación están encapsulados
+- la app ya tiene una base real y funcional sobre la que continuar desarrollando
 
-### Concepto: SMuFL
-Font estándar para notación musical (como Unicode para música). Incluye:
-- Notas (whole, half, quarter, eighth, sixteenth)
-- Silencios
-- Claves (Sol, Fa, Do)
-- Compases
-- Alteraciones (sostenido, bemol, becuadro)
-- Más de 2000 símbolos
+## Puntos de mejora
 
-### Librerías Recomendadas
-```yaml
-dependencies:
-  # Para SMuFL
-  google_fonts: ^6.0.0       # Incluye "Bravura" (SMuFL)
-  
-  # Para renderizado personalizado
-  flutter_canvas: usamos Canvas nativo
-  custom_paint: para dibujos avanzados
-```
+Aunque la arquitectura es sólida, todavía hay margen para reforzarla:
 
-### Estructura de Clases
+1. unificar la gestión de estado en pantallas complejas
+2. reducir lógica de UI mezclada con control del juego
+3. formalizar interfaces para audio y servicios
+4. definir mejor el contrato entre parser y dominio
+5. aumentar consistencia en naming y responsabilidades entre módulos
 
-#### 1. **SMuFLRenderer** (Dibujador Principal)
-```dart
-class SMuFLRenderer extends CustomPainter {
-  final MusicScore score;
-  final TicksEngine ticksEngine;
-  final List<NoteModel> visibleNotes;
-  
-  @override
-  void paint(Canvas canvas, Size size) {
-    // 1. Dibujar pentagrama
-    drawStaff(canvas, size);
-    
-    // 2. Dibujar claves y compases
-    drawClef(canvas);
-    drawTimeSignature(canvas);
-    
-    // 3. Dibujar notas
-    for (var note in visibleNotes) {
-      drawNote(canvas, note);
-    }
-    
-    // 4. Dibujar línea de hit
-    drawHitLine(canvas, size);
-  }
-}
+## Conclusión
+
+Este proyecto ya no está en una etapa de prototipo conceptual puro. Tiene una arquitectura funcional bastante madura para una app educativa musical con Flutter, con capas bien diferenciadas y una base sólida para continuar con nuevas mecánicas, modos de juego o integraciones multimedia.
+
+La documentación de referencia actual debe entenderse como una descripción del proyecto real y no como un plano futuro idealizado.
 ```
 
 #### 2. **StaffRenderer**
