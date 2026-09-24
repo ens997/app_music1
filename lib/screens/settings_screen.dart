@@ -1,6 +1,9 @@
 // lib/screens/settings_screen.dart
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../core/globals.dart';
+import '../services/latency_settings_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({Key? key}) : super(key: key);
@@ -23,9 +26,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Configuración'),
-      ),
+      appBar: AppBar(title: const Text('Configuración')),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(20),
@@ -108,6 +109,31 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 style: const TextStyle(fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 24),
+              const Divider(height: 1),
+              const SizedBox(height: 18),
+              const Text(
+                'Calibración de sincronización',
+                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 12),
+              _LatencySlider(
+                label: 'Latencia de audio',
+                value: audioLatencyMs.value,
+                onChanged: (value) {
+                  setState(() => audioLatencyMs.value = value);
+                  unawaited(LatencySettingsService.save());
+                },
+              ),
+              _LatencySlider(
+                label: 'Latencia de entrada',
+                value: inputLatencyMs.value,
+                onChanged: (value) {
+                  setState(() => inputLatencyMs.value = value);
+                  unawaited(LatencySettingsService.save());
+                },
+              ),
+              const SizedBox(height: 24),
               ElevatedButton(
                 onPressed: () => Navigator.pop(context),
                 child: const Text('Volver'),
@@ -116,6 +142,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
         ),
       ),
+    );
+  }
+}
+
+class _LatencySlider extends StatelessWidget {
+  final String label;
+  final int value;
+  final ValueChanged<int> onChanged;
+
+  const _LatencySlider({
+    required this.label,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('$label: ${value}ms'),
+        Slider(
+          min: 0,
+          max: 300,
+          divisions: 30,
+          value: value.toDouble(),
+          label: '${value}ms',
+          onChanged: (next) => onChanged(next.round()),
+        ),
+      ],
     );
   }
 }

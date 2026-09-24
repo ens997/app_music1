@@ -28,11 +28,14 @@ class GameSession {
   final List<void Function(GameState)> _stateListeners = [];
   final List<void Function()> _scoreListeners = [];
   final List<void Function()> _noteHitListeners = [];
-  final List<void Function(int noteIndex, HitQuality quality, bool isCorrectPitch)>
-      _noteFeedbackListeners = [];
+  final List<
+    void Function(int noteIndex, HitQuality quality, bool isCorrectPitch)
+  >
+  _noteFeedbackListeners = [];
 
   // Getter para el estado actual
   GameState get state => _state;
+  bool get isFinished => _state == GameState.finished;
 
   // Getters para estadísticas (pueden exponerse a la UI)
   int get currentScore => _currentScore;
@@ -71,7 +74,9 @@ class GameSession {
         if (!musicScore.notes[i].isRest) i,
     ];
     if (_hasPlayableNotes) {
-      final lastPlayableNote = musicScore.notes.lastWhere((note) => !note.isRest);
+      final lastPlayableNote = musicScore.notes.lastWhere(
+        (note) => !note.isRest,
+      );
       _completionTick = lastPlayableNote.targetTick + hitWindow.goodWindow;
     } else {
       _completionTick = 0;
@@ -117,6 +122,7 @@ class GameSession {
   }
 
   void finish() {
+    if (isFinished) return;
     _changeState(GameState.finished);
     ticksEngine.pause();
     metronomeController.stop();
@@ -139,7 +145,8 @@ class GameSession {
   bool handleNoteInput(String pitch) {
     if (_state != GameState.playing) return false;
 
-    final currentTick = ticksEngine.currentTick;
+    ticksEngine.update();
+    final currentTick = ticksEngine.tickForInput;
 
     // 1. Buscar la nota más cercana (en tiempo) que aún no ha sido golpeada
     NoteModel? closestNote;
@@ -149,9 +156,11 @@ class GameSession {
 
     _advancePlayableCursor();
     final candidateStart = _nextPlayablePosition;
-    for (int position = candidateStart;
-        position < _playableNoteIndices.length;
-        position++) {
+    for (
+      int position = candidateStart;
+      position < _playableNoteIndices.length;
+      position++
+    ) {
       final i = _playableNoteIndices[position];
       if (_hitNoteIndices.contains(i)) continue; // ya golpeada o perdida
 
@@ -273,63 +282,17 @@ class GameSession {
     }
   }
 
-  void _notifyNoteFeedback(int noteIndex, HitQuality quality, bool isCorrectPitch) {
+  void _notifyNoteFeedback(
+    int noteIndex,
+    HitQuality quality,
+    bool isCorrectPitch,
+  ) {
     for (var listener in _noteFeedbackListeners) {
       listener(noteIndex, quality, isCorrectPitch);
     }
   }
 
-  /// Normaliza el nombre de una nota a un formato estándar para comparación.
-  /// Ej: "C#4" -> "C#4", "Db5" -> "C#5" (enarmonía), "B4" -> "B4"
-  String _normalizePitch(String pitch) {
-    var p = pitch.trim().toUpperCase();
-    if (p.isEmpty) return p;
-    // Reemplazar símbolos unicode por # y b
-    p = p.replaceAll('♯', '#').replaceAll('♭', 'b');
-    final match = RegExp(r'^([A-G])([#b]?)(\d+)$').firstMatch(p);
-    if (match == null) return p;
-
-    final note = match.group(1)!;
-    final accidental = match.group(2) ?? '';
-    final octave = int.parse(match.group(3)!);
-
-    // Mapeo de notas a semitonos relativos a C
-    const semitoneMap = {
-      'C': 0,
-      'D': 2,
-      'E': 4,
-      'F': 5,
-      'G': 7,
-      'A': 9,
-      'B': 11,
-    };
-
-    var value = semitoneMap[note]! + (octave * 12);
-    if (accidental == '#') value += 1;
-    if (accidental == 'b') value -= 1;
-
-    // Convertir de vuelta a nombre de nota con octava
-    final normalizedOctave = value ~/ 12;
-    final normalizedClass = value % 12;
-
-    // Mapeo de clase a nombre (con sostenidos)
-    const classNames = {
-      0: 'C',
-      1: 'C#',
-      2: 'D',
-      3: 'D#',
-      4: 'E',
-      5: 'F',
-      6: 'F#',
-      7: 'G',
-      8: 'G#',
-      9: 'A',
-      10: 'A#',
-      11: 'B',
-    };
-
-    return '${classNames[normalizedClass]}$normalizedOctave';
-  }
+  String _normalizePitch(String pitch) => PitchUtils.normalize(pitch);
 
   // ============================================================
   // REGISTRO DE LISTENERS
@@ -350,8 +313,9 @@ class GameSession {
   /// Notifica el resultado de cada golpe (índice, calidad y acierto de tono)
   /// para alimentar feedback visual inmediato sin acoplar GameSession a la UI.
   void onNoteFeedback(
-      void Function(int noteIndex, HitQuality quality, bool isCorrectPitch)
-          callback) {
+    void Function(int noteIndex, HitQuality quality, bool isCorrectPitch)
+    callback,
+  ) {
     _noteFeedbackListeners.add(callback);
   }
 
@@ -368,8 +332,9 @@ class GameSession {
   }
 
   void removeNoteFeedbackListener(
-      void Function(int noteIndex, HitQuality quality, bool isCorrectPitch)
-          callback) {
+    void Function(int noteIndex, HitQuality quality, bool isCorrectPitch)
+    callback,
+  ) {
     _noteFeedbackListeners.remove(callback);
   }
 

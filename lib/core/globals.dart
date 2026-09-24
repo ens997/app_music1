@@ -3,10 +3,15 @@ import 'package:flutter/material.dart';
 
 const double _minNoteSpacingScale = 0.75;
 const double _maxNoteSpacingScale = 1.0;
-final ValueNotifier<double> noteSpacingScale =
-    ValueNotifier<double>(_maxNoteSpacingScale);
+final ValueNotifier<double> noteSpacingScale = ValueNotifier<double>(
+  _maxNoteSpacingScale,
+);
 
 const double _minMusicStartOffsetScale = 0.0;
 const double _maxMusicStartOffsetScale = 1.0;
-final ValueNotifier<double> musicStartOffsetScale =
-    ValueNotifier<double>(_minMusicStartOffsetScale);
+final ValueNotifier<double> musicStartOffsetScale = ValueNotifier<double>(
+  _minMusicStartOffsetScale,
+);
+
+final ValueNotifier<int> audioLatencyMs = ValueNotifier<int>(0);
+final ValueNotifier<int> inputLatencyMs = ValueNotifier<int>(0);

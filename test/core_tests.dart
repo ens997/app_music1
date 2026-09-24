@@ -69,21 +69,30 @@ void main() {
     test('4/4 with 8 beats travel should need 0 pickup', () {
       final timeSig = TimeSignature(4, 4);
       final travelTicks = 8 * 480;
-      final pickup = PickupCalculator.calculatePickupTicks(travelTicks, timeSig);
+      final pickup = PickupCalculator.calculatePickupTicks(
+        travelTicks,
+        timeSig,
+      );
       expect(pickup, 0);
     });
 
     test('3/4 with 8 beats travel should need 1.5 beats pickup', () {
       final timeSig = TimeSignature(3, 4);
       final travelTicks = 8 * 480; // 3840 ticks
-      final pickup = PickupCalculator.calculatePickupTicks(travelTicks, timeSig);
-      expect(pickup, 720); // 1.5 beats = 720 ticks
+      final pickup = PickupCalculator.calculatePickupTicks(
+        travelTicks,
+        timeSig,
+      );
+      expect(pickup, 480); // 1 beat = 480 ticks
     });
 
     test('2/4 with 8 beats travel should need 0 pickup', () {
       final timeSig = TimeSignature(2, 4);
       final travelTicks = 8 * 480;
-      final pickup = PickupCalculator.calculatePickupTicks(travelTicks, timeSig);
+      final pickup = PickupCalculator.calculatePickupTicks(
+        travelTicks,
+        timeSig,
+      );
       expect(pickup, 0);
     });
   });

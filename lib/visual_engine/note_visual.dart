@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../core/core.dart';
+import '../core/musical_engine/pitch_utils.dart';
 import 'bravura_glyphs.dart';
 import 'staff_renderer.dart';
 
@@ -71,11 +72,11 @@ class NoteVisual {
 
     // 4 argumentos: canvas, Offset, NoteDuration, Color
     _drawNoteHead(canvas, Offset(headX, headY), note.duration, fillColor);
-    
+
     if (note.isDotted && _supportsAugmentationDot(note.duration)) {
       _drawAugmentationDot(canvas, Offset(headX, headY), fillColor);
     }
-    
+
     _drawStem(
       canvas,
       Offset(headX, headY),
@@ -93,9 +94,8 @@ class NoteVisual {
   }
 
   static String basePitchKey(String pitch) {
-    final match = RegExp(r'^([A-G])[#b]?(-?\d+)$').firstMatch(pitch.trim());
-    if (match == null) return pitch;
-    return '${match.group(1)}${match.group(2)}';
+    final parsed = PitchUtils.parse(pitch);
+    return parsed == null ? pitch : '${parsed.note}${parsed.octave}';
   }
 
   static void _drawLedgerLines(
@@ -107,16 +107,38 @@ class NoteVisual {
     const ledgerWidth = 35.0;
 
     if (position >= 10) {
-      for (int ledgerPosition = 10; ledgerPosition <= position; ledgerPosition += 2) {
-        final ledgerY = StaffRenderer.getNoteYPosition(staffTop, ledgerPosition);
-        StaffRenderer.drawLedgerLine(canvas, Offset(noteX, ledgerY), ledgerWidth);
+      for (
+        int ledgerPosition = 10;
+        ledgerPosition <= position;
+        ledgerPosition += 2
+      ) {
+        final ledgerY = StaffRenderer.getNoteYPosition(
+          staffTop,
+          ledgerPosition,
+        );
+        StaffRenderer.drawLedgerLine(
+          canvas,
+          Offset(noteX, ledgerY),
+          ledgerWidth,
+        );
       }
     }
 
     if (position <= -2) {
-      for (int ledgerPosition = -2; ledgerPosition >= position; ledgerPosition -= 2) {
-        final ledgerY = StaffRenderer.getNoteYPosition(staffTop, ledgerPosition);
-        StaffRenderer.drawLedgerLine(canvas, Offset(noteX, ledgerY), ledgerWidth);
+      for (
+        int ledgerPosition = -2;
+        ledgerPosition >= position;
+        ledgerPosition -= 2
+      ) {
+        final ledgerY = StaffRenderer.getNoteYPosition(
+          staffTop,
+          ledgerPosition,
+        );
+        StaffRenderer.drawLedgerLine(
+          canvas,
+          Offset(noteX, ledgerY),
+          ledgerWidth,
+        );
       }
     }
   }
@@ -167,23 +189,14 @@ class NoteVisual {
     final headAnchorYOffset = StaffRenderer.SPACE_HEIGHT * 0.08;
 
     final startX = position.dx + (stemUp ? headAnchorX : -headAnchorX);
-    final startY = position.dy + (stemUp ? headAnchorYOffset : -headAnchorYOffset);
+    final startY =
+        position.dy + (stemUp ? headAnchorYOffset : -headAnchorYOffset);
     final endY = startY + (stemUp ? -stemLength : stemLength);
 
-    canvas.drawLine(
-      Offset(startX, startY),
-      Offset(startX, endY),
-      _stemPaint,
-    );
+    canvas.drawLine(Offset(startX, startY), Offset(startX, endY), _stemPaint);
 
     if (duration == NoteDuration.eighth || duration == NoteDuration.sixteenth) {
-      _drawFlag(
-        canvas,
-        Offset(startX, endY),
-        stemUp,
-        duration,
-        color,
-      );
+      _drawFlag(canvas, Offset(startX, endY), stemUp, duration, color);
     }
   }
 
@@ -214,8 +227,16 @@ class NoteVisual {
 
     final topLeft = Offset(
       stemUp
-          ? stemEnd.dx - stemHalfWidth - horizontalAttachment + xOffset + manualHorizontalShift
-          : stemEnd.dx + stemHalfWidth - horizontalAttachment + xOffset - manualHorizontalShift,
+          ? stemEnd.dx -
+                stemHalfWidth -
+                horizontalAttachment +
+                xOffset +
+                manualHorizontalShift
+          : stemEnd.dx +
+                stemHalfWidth -
+                horizontalAttachment +
+                xOffset -
+                manualHorizontalShift,
       stemUp
           ? stemEnd.dy - verticalAttachment + yOffset
           : stemEnd.dy - verticalAttachment + yOffset,
@@ -271,23 +292,39 @@ class NoteVisual {
 
     switch (accidental) {
       case Accidental.sharp:
-        return (fontSize: fontSize, xOffset: xOffset, yOffset: -StaffRenderer.SPACE_HEIGHT * 0.08);
+        return (
+          fontSize: fontSize,
+          xOffset: xOffset,
+          yOffset: -StaffRenderer.SPACE_HEIGHT * 0.08,
+        );
       case Accidental.flat:
-        return (fontSize: fontSize, xOffset: xOffset, yOffset: StaffRenderer.SPACE_HEIGHT * 0.10);
+        return (
+          fontSize: fontSize,
+          xOffset: xOffset,
+          yOffset: StaffRenderer.SPACE_HEIGHT * 0.10,
+        );
       case Accidental.doubleSharp:
-        return (fontSize: fontSize, xOffset: xOffset - (StaffRenderer.SPACE_HEIGHT * 0.05), yOffset: -StaffRenderer.SPACE_HEIGHT * 0.02);
+        return (
+          fontSize: fontSize,
+          xOffset: xOffset - (StaffRenderer.SPACE_HEIGHT * 0.05),
+          yOffset: -StaffRenderer.SPACE_HEIGHT * 0.02,
+        );
       case Accidental.doubleFlat:
-        return (fontSize: fontSize, xOffset: xOffset, yOffset: StaffRenderer.SPACE_HEIGHT * 0.10);
+        return (
+          fontSize: fontSize,
+          xOffset: xOffset,
+          yOffset: StaffRenderer.SPACE_HEIGHT * 0.10,
+        );
       case Accidental.natural:
-        return (fontSize: fontSize, xOffset: xOffset, yOffset: -StaffRenderer.SPACE_HEIGHT * 0.02);
+        return (
+          fontSize: fontSize,
+          xOffset: xOffset,
+          yOffset: -StaffRenderer.SPACE_HEIGHT * 0.02,
+        );
     }
   }
 
-  static void _drawNoteLabel(
-    Canvas canvas,
-    Offset position,
-    NoteModel note,
-  ) {
+  static void _drawNoteLabel(Canvas canvas, Offset position, NoteModel note) {
     final text = '${note.noteName}${note.octave}';
     _labelPainter.text = TextSpan(
       text: text,

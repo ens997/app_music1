@@ -7,6 +7,7 @@ import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 
+import '../core/musical_engine/pitch_utils.dart';
 import 'metronome_click_generator.dart';
 
 /// Servicio de audio optimizado para piano.
@@ -14,9 +15,42 @@ import 'metronome_click_generator.dart';
 /// - Cachea las ondas en disco para reutilización.
 class PianoAudioService {
   static const List<String> _supportedNotes = [
-    'C4', 'C#4', 'D4', 'D#4', 'E4', 'F4', 'F#4', 'G4', 'G#4', 'A4', 'A#4', 'B4',
-    'C5', 'C#5', 'D5', 'D#5', 'E5', 'F5', 'F#5', 'G5', 'G#5', 'A5', 'A#5', 'B5',
-    'C6', 'C#6', 'D6', 'D#6', 'E6', 'F6', 'F#6', 'G6', 'G#6', 'A6', 'A#6', 'B6',
+    'C4',
+    'C#4',
+    'D4',
+    'D#4',
+    'E4',
+    'F4',
+    'F#4',
+    'G4',
+    'G#4',
+    'A4',
+    'A#4',
+    'B4',
+    'C5',
+    'C#5',
+    'D5',
+    'D#5',
+    'E5',
+    'F5',
+    'F#5',
+    'G5',
+    'G#5',
+    'A5',
+    'A#5',
+    'B5',
+    'C6',
+    'C#6',
+    'D6',
+    'D#6',
+    'E6',
+    'F6',
+    'F#6',
+    'G6',
+    'G#6',
+    'A6',
+    'A#6',
+    'B6',
   ];
 
   final List<AudioPlayer> _players = [];
@@ -65,7 +99,10 @@ class PianoAudioService {
 
       // Generar notas faltantes en Isolate
       if (notesToGenerate.isNotEmpty) {
-        final generatedBytes = await compute(_generateWavesInBackground, notesToGenerate);
+        final generatedBytes = await compute(
+          _generateWavesInBackground,
+          notesToGenerate,
+        );
         for (final entry in generatedBytes.entries) {
           final note = entry.key;
           final bytes = entry.value;
@@ -89,7 +126,10 @@ class PianoAudioService {
 
   /// Reproduce un click de metrónomo (percusión suave).
   /// isAccent: true para click de acento (más fuerte), false para click normal.
-  Future<void> playMetronomeClick({required bool isAccent, double volume = 0.85}) async {
+  Future<void> playMetronomeClick({
+    required bool isAccent,
+    double volume = 0.85,
+  }) async {
     if (!_initialized) {
       await initialize();
     }
@@ -98,10 +138,7 @@ class PianoAudioService {
     final player = _players[_playerIndex];
     _playerIndex = (_playerIndex + 1) % _players.length;
 
-    await player.play(
-      BytesSource(bytes),
-      volume: volume.clamp(0.0, 1.0),
-    );
+    await player.play(BytesSource(bytes), volume: volume.clamp(0.0, 1.0));
   }
 
   /// Reproduce una nota (pool de reproductores).
@@ -109,16 +146,14 @@ class PianoAudioService {
     if (!_initialized) {
       await initialize();
     }
-    final bytes = _noteWaveBytes[note];
+    final canonicalNote = PitchUtils.normalize(note);
+    final bytes = _noteWaveBytes[canonicalNote];
     if (bytes == null) return;
 
     final player = _players[_playerIndex];
     _playerIndex = (_playerIndex + 1) % _players.length;
 
-    await player.play(
-      BytesSource(bytes),
-      volume: volume.clamp(0.0, 1.0),
-    );
+    await player.play(BytesSource(bytes), volume: volume.clamp(0.0, 1.0));
   }
 
   /// Libera recursos.
@@ -148,7 +183,9 @@ class PianoAudioService {
 
 /// Genera un mapa de notas -> bytes WAV en un Isolate.
 /// Recibe una lista de nombres de notas y retorna un Map<String, Uint8List>.
-Future<Map<String, Uint8List>> _generateWavesInBackground(List<String> notes) async {
+Future<Map<String, Uint8List>> _generateWavesInBackground(
+  List<String> notes,
+) async {
   final result = <String, Uint8List>{};
   for (final note in notes) {
     final frequency = _noteToFrequency(note);
@@ -168,25 +205,7 @@ Future<Map<String, Uint8List>> _generateWavesInBackground(List<String> notes) as
 // ============================================================
 
 double _noteToFrequency(String note) {
-  final match = RegExp(r'^([A-G])(#?)(\d)$').firstMatch(note);
-  if (match == null) return 440.0;
-
-  final name = match.group(1)!;
-  final isSharp = match.group(2) == '#';
-  final octave = int.parse(match.group(3)!);
-
-  const semitoneBase = {
-    'C': 0,
-    'D': 2,
-    'E': 4,
-    'F': 5,
-    'G': 7,
-    'A': 9,
-    'B': 11,
-  };
-
-  final midi = (octave + 1) * 12 + semitoneBase[name]! + (isSharp ? 1 : 0);
-  return 440.0 * math.pow(2.0, (midi - 69) / 12.0).toDouble();
+  return PitchUtils.toFrequency(note) ?? 440.0;
 }
 
 int _durationForNote(String note) {
@@ -237,7 +256,8 @@ Uint8List _buildSineWaveWav({
   buffer.setUint32(40, dataSize, Endian.little);
 
   final twoPiF = 2.0 * math.pi * frequencyHz;
-  final octave = int.tryParse(RegExp(r'\d$').firstMatch(note)?.group(0) ?? '5') ?? 5;
+  final octave =
+      int.tryParse(RegExp(r'\d$').firstMatch(note)?.group(0) ?? '5') ?? 5;
   final attackSamples = (sampleRate * 0.0035).round();
   final decaySamples = (sampleRate * (octave <= 4 ? 0.16 : 0.11)).round();
   final releaseSamples = (sampleRate * (octave <= 4 ? 0.22 : 0.14)).round();
@@ -260,21 +280,29 @@ Uint8List _buildSineWaveWav({
     );
 
     final fundamental = math.sin(twoPiF * t) * math.exp(-fundamentalDecay * t);
-    final second = math.sin((twoPiF * 2.0 * t) + phase2) * math.exp(-overtoneDecay * t);
-    final third = math.sin((twoPiF * 3.0 * t) + phase3) * math.exp(-(overtoneDecay + 1.2) * t);
-    final fourth = math.sin((twoPiF * 4.0 * t) + phase4) * math.exp(-(overtoneDecay + 2.1) * t);
-    final detune = math.sin((twoPiF * 1.003 * t) + 0.17) * math.exp(-(fundamentalDecay + 0.9) * t);
-    final hammerNoise = (math.sin(2.0 * math.pi * 6400 * t) + math.sin(2.0 * math.pi * 5100 * t)) *
+    final second =
+        math.sin((twoPiF * 2.0 * t) + phase2) * math.exp(-overtoneDecay * t);
+    final third =
+        math.sin((twoPiF * 3.0 * t) + phase3) *
+        math.exp(-(overtoneDecay + 1.2) * t);
+    final fourth =
+        math.sin((twoPiF * 4.0 * t) + phase4) *
+        math.exp(-(overtoneDecay + 2.1) * t);
+    final detune =
+        math.sin((twoPiF * 1.003 * t) + 0.17) *
+        math.exp(-(fundamentalDecay + 0.9) * t);
+    final hammerNoise =
+        (math.sin(2.0 * math.pi * 6400 * t) +
+            math.sin(2.0 * math.pi * 5100 * t)) *
         math.exp(-38 * t);
 
-    final sample = (
-          (fundamental * 0.72) +
-          (second * 0.18) +
-          (third * 0.08) +
-          (fourth * 0.04) +
-          (detune * 0.06) +
-          (hammerNoise * 0.018)
-        ) *
+    final sample =
+        ((fundamental * 0.72) +
+            (second * 0.18) +
+            (third * 0.08) +
+            (fourth * 0.04) +
+            (detune * 0.06) +
+            (hammerNoise * 0.018)) *
         env *
         0.62;
     final intSample = (sample * 32767).round().clamp(-32768, 32767);
@@ -300,7 +328,8 @@ double _envelopeForSample({
   final decayEnd = attackSamples + decaySamples;
   if (sampleIndex < decayEnd) {
     final decayProgress = (sampleIndex - attackSamples) / decaySamples;
-    return 1.0 - ((1.0 - sustainLevel) * math.pow(decayProgress, 0.85).toDouble());
+    return 1.0 -
+        ((1.0 - sustainLevel) * math.pow(decayProgress, 0.85).toDouble());
   }
 
   final releaseStart = totalSamples - releaseSamples;
@@ -309,5 +338,6 @@ double _envelopeForSample({
   }
 
   final releaseProgress = (sampleIndex - releaseStart) / releaseSamples;
-  return sustainLevel * (1.0 - math.pow(releaseProgress, 1.4).toDouble()).clamp(0.0, 1.0);
+  return sustainLevel *
+      (1.0 - math.pow(releaseProgress, 1.4).toDouble()).clamp(0.0, 1.0);
 }

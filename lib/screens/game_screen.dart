@@ -1,9 +1,8 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
@@ -16,7 +15,6 @@ import '../parsers/musicxml_parser.dart';
 import '../providers/exercise_provider.dart';
 import '../services/exercise_loader_service.dart';
 import '../visual_engine/visual_engine.dart';
-import '../visual_engine/note_layout.dart';
 
 class GameScreen extends StatefulWidget {
   final String? preloadedFilePath;
@@ -36,19 +34,21 @@ class GameScreen extends StatefulWidget {
   State<GameScreen> createState() => _GameScreenState();
 }
 
-class _GameScreenState extends State<GameScreen> {
+class _GameScreenState extends State<GameScreen>
+    with SingleTickerProviderStateMixin {
   final AnimationManager _animationManager = AnimationManager();
   final GameAudioTrackController _gameAudioTrackController =
       GameAudioTrackController();
   final PianoAudioService _pianoAudioService = PianoAudioService();
   static const double _basePixelsPerTick = 0.35;
-  static const Duration _autoScrollInterval = Duration(milliseconds: 16);
   static const double _staffTop = SMuFLRenderer.compactStaffTop;
   static const double _leftMargin = 80;
 
   late final ScrollController _scrollController;
-  Timer? _autoScrollTimer;
-  DateTime? _lastAutoScrollFrame;
+  late final Ticker _gameTicker;
+  late final VoidCallback _scrollListener;
+  late final Listenable _visualRepaint;
+  Duration? _lastAutoScrollFrame;
   bool _isPlaying = false;
   bool _isPreparing = false;
   late final Future<void> _audioInitialization;
@@ -58,6 +58,13 @@ class _GameScreenState extends State<GameScreen> {
   bool _isLoading = false;
   String _status = '';
   double _currentViewportWidth = 0.0;
+  bool _isLeaving = false;
+  bool _hasCompletedRun = false;
+  bool _isShowingResultsDialog = false;
+  void Function(GameState)? _sessionStateListener;
+  VoidCallback? _sessionNoteHitListener;
+  void Function(int noteIndex, HitQuality quality, bool isCorrectPitch)?
+  _sessionNoteFeedbackListener;
 
   // --- ValueNotifier para los layouts precalculados ---
   final ValueNotifier<List<NoteLayout>> _noteLayoutsNotifier =
@@ -70,11 +77,13 @@ class _GameScreenState extends State<GameScreen> {
   @override
   void initState() {
     super.initState();
+    _gameTicker = createTicker(_onGameTick);
     _scrollController = ScrollController();
-
-    _scrollController.addListener(() {
-      _scrollOffset.value = _scrollController.offset;
-    });
+    _scrollListener = () {
+      if (!_isLeaving) _scrollOffset.value = _scrollController.offset;
+    };
+    _scrollController.addListener(_scrollListener);
+    _visualRepaint = Listenable.merge([_scrollOffset, _gameRevision]);
 
     noteSpacingScale.addListener(_updateNoteLayouts);
     musicStartOffsetScale.addListener(_updateNoteLayouts);
@@ -104,16 +113,17 @@ class _GameScreenState extends State<GameScreen> {
 
   @override
   void dispose() {
+    _isLeaving = true;
     _stopAutoScroll();
+    noteSpacingScale.removeListener(_updateNoteLayouts);
+    musicStartOffsetScale.removeListener(_updateNoteLayouts);
+    _scrollController.removeListener(_scrollListener);
+    _detachGameSessionListeners();
+    _gameSession?.stop();
+    _gameTicker.dispose();
     _scrollController.dispose();
     unawaited(_gameAudioTrackController.dispose());
     _pianoAudioService.dispose();
-    _gameSession?.stop();
-    _noteLayoutsNotifier.dispose();
-    _scrollOffset.dispose();
-    _gameRevision.dispose();
-    noteSpacingScale.removeListener(_updateNoteLayouts);
-    musicStartOffsetScale.removeListener(_updateNoteLayouts);
     super.dispose();
   }
 
@@ -142,7 +152,7 @@ class _GameScreenState extends State<GameScreen> {
           _isPlaying = false;
           _status = '';
           _gameSession = GameSession(
-            ticksEngine: TicksEngine(initialBpm: score.bpm),
+            ticksEngine: _createTicksEngine(score),
             scoreEngine: ScoreEngine(),
             musicScore: score,
             audioService: _pianoAudioService,
@@ -179,7 +189,7 @@ class _GameScreenState extends State<GameScreen> {
           _isPlaying = false;
           _status = '';
           _gameSession = GameSession(
-            ticksEngine: TicksEngine(initialBpm: score.bpm),
+            ticksEngine: _createTicksEngine(score),
             scoreEngine: ScoreEngine(),
             musicScore: score,
             audioService: _pianoAudioService,
@@ -227,7 +237,7 @@ class _GameScreenState extends State<GameScreen> {
         _isPlaying = false;
         _status = '🎵 ${firstExercise.title} - ${firstExercise.composer}';
         _gameSession = GameSession(
-          ticksEngine: TicksEngine(initialBpm: score.bpm),
+          ticksEngine: _createTicksEngine(score),
           scoreEngine: ScoreEngine(),
           musicScore: score,
           audioService: _pianoAudioService,
@@ -249,16 +259,42 @@ class _GameScreenState extends State<GameScreen> {
   /// Registra los listeners de GameSession comunes a todas las rutas de carga:
   /// revisión de UI en cada hit y feedback visual minimalista por nota.
   void _attachGameSessionListeners() {
+    _detachGameSessionListeners();
     final session = _gameSession!;
-    session.onNoteHit(() {
+    _sessionStateListener = (state) {
+      if (state == GameState.finished && mounted && !_isLeaving) {
+        _completeRun();
+      }
+    };
+    _sessionNoteHitListener = () {
       if (mounted) _gameRevision.value++;
-    });
-    session.onNoteFeedback((noteIndex, quality, isCorrectPitch) {
+    };
+    _sessionNoteFeedbackListener = (noteIndex, quality, isCorrectPitch) {
       final layouts = _noteLayoutsNotifier.value;
       if (noteIndex < 0 || noteIndex >= layouts.length) return;
       final tier = FeedbackTier.fromHit(quality, isCorrectPitch);
       _animationManager.addHitFeedback(layouts[noteIndex].position, tier);
-    });
+    };
+    session.onStateChange(_sessionStateListener!);
+    session.onNoteHit(_sessionNoteHitListener!);
+    session.onNoteFeedback(_sessionNoteFeedbackListener!);
+  }
+
+  void _detachGameSessionListeners() {
+    final session = _gameSession;
+    if (session == null) return;
+    if (_sessionStateListener != null) {
+      session.removeStateListener(_sessionStateListener!);
+    }
+    if (_sessionNoteHitListener != null) {
+      session.removeNoteHitListener(_sessionNoteHitListener!);
+    }
+    if (_sessionNoteFeedbackListener != null) {
+      session.removeNoteFeedbackListener(_sessionNoteFeedbackListener!);
+    }
+    _sessionStateListener = null;
+    _sessionNoteHitListener = null;
+    _sessionNoteFeedbackListener = null;
   }
 
   Future<void> _initializeAudio() async {
@@ -316,31 +352,53 @@ class _GameScreenState extends State<GameScreen> {
 
   double get _pixelsPerTick => _basePixelsPerTick * noteSpacingScale.value;
 
+  TicksEngine _createTicksEngine(MusicScore score) {
+    return TicksEngine(initialBpm: score.bpm)
+      ..audioLatencyMs = audioLatencyMs.value
+      ..inputLatencyMs = inputLatencyMs.value;
+  }
+
   // ============================================================
   // MÉTODOS DE CONTROL DEL JUEGO
   // ============================================================
 
-  void _startFromBeginning() {
+  Future<void> _startFromBeginning() async {
     if (_gameSession == null || _isPreparing) return;
+    _hasCompletedRun = false;
+    _isShowingResultsDialog = false;
+    setState(() => _isPreparing = true);
+
+    await _gameAudioTrackController.playFromStart();
+    if (!mounted || _isLeaving) return;
+
     _gameSession!.restart();
     _gameSession!.start();
     setState(() {
       _isPlaying = true;
+      _isPreparing = false;
       _status = '';
     });
-    unawaited(_gameAudioTrackController.playFromStart());
     _startAutoScrollForLoadedScore();
   }
 
-  void _finishGame() {
+  void _completeRun() {
+    if (_hasCompletedRun || _isLeaving || !mounted) return;
+    final session = _gameSession;
+    if (session == null) return;
+
+    _hasCompletedRun = true;
+    _stopAutoScroll();
     unawaited(_gameAudioTrackController.stop());
-    _gameSession?.finish();
-    if (widget.exercise != null && mounted) {
+    if (_isPlaying) {
+      setState(() => _isPlaying = false);
+    }
+
+    if (widget.exercise != null) {
       final provider = context.read<ExerciseProvider>();
       final updatedExercise = widget.exercise!.copyWith(
         timesCompleted: widget.exercise!.timesCompleted + 1,
-        bestScore: _gameSession!.currentScore > widget.exercise!.bestScore
-            ? _gameSession!.currentScore.toDouble()
+        bestScore: session.currentScore > widget.exercise!.bestScore
+            ? session.currentScore.toDouble()
             : widget.exercise!.bestScore,
       );
       provider.updateExercise(updatedExercise);
@@ -348,19 +406,22 @@ class _GameScreenState extends State<GameScreen> {
     }
   }
 
-  void _resetAndRestart() {
-    unawaited(_gameAudioTrackController.stop());
+  Future<void> _resetAndRestart() async {
+    await _gameAudioTrackController.stop();
+    if (!mounted || _isLeaving) return;
     _gameSession?.restart();
     _scrollController.jumpTo(0);
     setState(() {});
-    _startFromBeginning();
+    await _startFromBeginning();
   }
 
-  void _showResultsDialog() {
-    showDialog(
+  Future<void> _showResultsDialog() async {
+    if (_isShowingResultsDialog || !mounted) return;
+    _isShowingResultsDialog = true;
+    final action = await showDialog<_ResultsAction>(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         title: const Text('🎉 ¡Ejercicio Completado!'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
@@ -401,21 +462,30 @@ class _GameScreenState extends State<GameScreen> {
         actions: [
           TextButton(
             onPressed: () {
-              Navigator.pop(context);
-              Navigator.pop(context);
+              Navigator.of(dialogContext).pop(_ResultsAction.leave);
             },
             child: const Text('Volver a Ejercicios'),
           ),
           TextButton(
             onPressed: () {
-              Navigator.pop(context);
-              _resetAndRestart();
+              Navigator.of(dialogContext).pop(_ResultsAction.retry);
             },
             child: const Text('Reintentar'),
           ),
         ],
       ),
     );
+    _isShowingResultsDialog = false;
+    if (!mounted || _isLeaving) return;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _isLeaving) return;
+      if (action == _ResultsAction.leave) {
+        _leaveGame();
+      } else if (action == _ResultsAction.retry) {
+        unawaited(_resetAndRestart());
+      }
+    });
   }
 
   // ============================================================
@@ -423,55 +493,63 @@ class _GameScreenState extends State<GameScreen> {
   // ============================================================
 
   void _startAutoScrollForLoadedScore() {
-    final score = _loadedScore;
-    if (score == null) return;
+    if (_loadedScore == null) return;
     _stopAutoScroll();
-    _lastAutoScrollFrame = DateTime.now();
+    _lastAutoScrollFrame = Duration.zero;
+    _gameTicker.start();
+  }
 
-    _autoScrollTimer = Timer.periodic(_autoScrollInterval, (_) async {
-      if (!mounted || !_scrollController.hasClients || _gameSession == null)
-        return;
+  void _onGameTick(Duration elapsed) {
+    final session = _gameSession;
+    final score = _loadedScore;
+    if (!mounted ||
+        !_scrollController.hasClients ||
+        session == null ||
+        score == null) {
+      return;
+    }
+    if (_hasCompletedRun || session.isFinished) {
+      _stopAutoScroll();
+      return;
+    }
 
-      // Actualizar la sesión del juego (incluye ticksEngine y metrónomo)
-      await _gameSession!.update();
+    unawaited(session.update());
 
-      if (!_gameSession!.hasPlayableNotes ||
-          _gameSession!.ticksEngine.currentTick >=
-              _gameSession!.completionTick) {
-        _stopAutoScroll();
-        if (mounted) {
-          setState(() => _isPlaying = false);
-          _finishGame();
-        }
-        return;
-      }
+    if (!session.hasPlayableNotes ||
+        session.ticksEngine.currentTick >= session.completionTick) {
+      session.finish();
+      return;
+    }
 
-      final ticksPerSecond = (TicksEngine.tpnq * score.bpm) / 60.0;
-      final pixelsPerSecond = ticksPerSecond * _pixelsPerTick;
+    final last = _lastAutoScrollFrame ?? elapsed;
+    _lastAutoScrollFrame = elapsed;
+    final dt = elapsed - last;
+    if (dt <= Duration.zero) return;
 
-      final now = DateTime.now();
-      final last = _lastAutoScrollFrame ?? now;
-      _lastAutoScrollFrame = now;
+    final ticksPerSecond = (TicksEngine.tpnq * score.bpm) / 60.0;
+    final pixelsPerSecond = ticksPerSecond * _pixelsPerTick;
+    final dtSeconds = dt.inMicroseconds / 1000000.0;
+    final currentOffset = _scrollController.offset;
+    final maxOffset = _scrollController.position.maxScrollExtent;
+    final nextOffset = currentOffset + (pixelsPerSecond * dtSeconds);
 
-      final dtSeconds = now.difference(last).inMicroseconds / 1000000.0;
-      if (dtSeconds <= 0) return;
-
-      final currentOffset = _scrollController.offset;
-      final maxOffset = _scrollController.position.maxScrollExtent;
-      final nextOffset = currentOffset + (pixelsPerSecond * dtSeconds);
-
-      if (nextOffset >= maxOffset) {
-        _scrollController.jumpTo(maxOffset);
-      } else {
-        _scrollController.jumpTo(nextOffset);
-      }
-    });
+    _scrollController.jumpTo(nextOffset >= maxOffset ? maxOffset : nextOffset);
   }
 
   void _stopAutoScroll() {
-    _autoScrollTimer?.cancel();
-    _autoScrollTimer = null;
+    _gameTicker.stop();
     _lastAutoScrollFrame = null;
+  }
+
+  void _leaveGame() {
+    if (_isLeaving || !mounted) return;
+    _isLeaving = true;
+    _stopAutoScroll();
+    _gameSession?.stop();
+    unawaited(_gameAudioTrackController.stop());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) Navigator.of(context).pop();
+    });
   }
 
   // ============================================================
@@ -542,7 +620,7 @@ class _GameScreenState extends State<GameScreen> {
             Row(
               children: [
                 IconButton(
-                  onPressed: () => Navigator.pop(context),
+                  onPressed: _leaveGame,
                   icon: const Icon(Icons.arrow_back, size: 28),
                   tooltip: 'Volver',
                   padding: EdgeInsets.zero,
@@ -687,7 +765,9 @@ class _GameScreenState extends State<GameScreen> {
                       final newViewportWidth = constraints.maxWidth;
                       if (newViewportWidth != _currentViewportWidth) {
                         _currentViewportWidth = newViewportWidth;
-                        _updateNoteLayouts(); // recalcular si cambia el ancho
+                        WidgetsBinding.instance.addPostFrameCallback((_) {
+                          if (mounted) _updateNoteLayouts();
+                        });
                       }
                       final calculatedWidth = (maxTick * _pixelsPerTick) + 160;
                       final width = calculatedWidth < minWidth
@@ -762,10 +842,7 @@ class _GameScreenState extends State<GameScreen> {
                                                       _scrollOffset.value,
                                                   scrollOffsetListenable:
                                                       _scrollOffset,
-                                                  repaint: Listenable.merge([
-                                                    _scrollOffset,
-                                                    _gameRevision,
-                                                  ]),
+                                                  repaint: _visualRepaint,
                                                   viewportWidth:
                                                       _currentViewportWidth,
                                                 ),
@@ -790,6 +867,7 @@ class _GameScreenState extends State<GameScreen> {
                                   : Colors.grey;
                               return Positioned(
                                 left: 0,
+                                right: 0,
                                 top: 0,
                                 bottom: 0,
                                 child: IgnorePointer(
@@ -879,3 +957,5 @@ class _GameScreenState extends State<GameScreen> {
     );
   }
 }
+
+enum _ResultsAction { leave, retry }

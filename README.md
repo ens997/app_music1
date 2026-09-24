@@ -27,6 +27,8 @@ La implementación actual ya incluye:
 - render visual del pentagrama con `CustomPainter`
 - animaciones de feedback visual
 - audio de metrónomo y servicio de piano
+- reloj musical monotónico con fuente de tiempo inyectable para tests
+- calibración persistente de latencia de audio y entrada (0-300 ms)
 - pruebas unitarias para motor visual y lógica relevante
 
 ## Stack tecnológico
@@ -68,6 +70,7 @@ lib/
 │   └── screens.dart
 ├── services/
 │   ├── exercise_loader_service.dart
+│   ├── latency_settings_service.dart
 │   └── musicxml_preload_service.dart
 ├── visual_engine/
 │   ├── animation_manager.dart
@@ -115,6 +118,11 @@ La clase `GameSession` orquesta la partida:
 - detección de aciertos por tiempo y pitch
 - notificaciones a la interfaz
 
+El tiempo de la sesión se obtiene de `TicksEngine`, que usa `Stopwatch` como
+reloj monotónico por defecto y permite inyectar `FakeTimeSource` en pruebas.
+El `Ticker` de Flutter solo actualiza la interfaz y el desplazamiento visual;
+no es la fuente de verdad temporal.
+
 ### 5. Parsers
 `MusicXMLParser` convierte archivos MusicXML a modelos internos del proyecto para su uso dentro de la lógica del juego.
 
@@ -155,6 +163,7 @@ El proyecto incluye pruebas para:
 - render de staff y notas
 - animaciones
 - lógica de puntuación y feedback
+- reloj temporal y compensación de latencia
 
 Ejemplo:
 
@@ -170,6 +179,10 @@ El proyecto ya tiene una base sólida para continuar con una aplicación musical
 - reducir acoplamiento en pantallas complejas
 - documentar contratos entre módulos
 - refinar patrones de acceso a servicios y audio
+
+La pantalla de configuración permite ajustar la latencia percibida del audio y
+la latencia de entrada. Estos valores se guardan con `shared_preferences` y se
+aplican a las nuevas sesiones de juego.
 
 ## Ficheros de documentación relacionados
 

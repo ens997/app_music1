@@ -26,11 +26,7 @@ void main() {
           absoluteTick: 0,
           isRest: true,
         ),
-        NoteModel(
-          pitch: 'D4',
-          duration: NoteDuration.quarter,
-          absoluteTick: 0,
-        ),
+        NoteModel(pitch: 'D4', duration: NoteDuration.quarter, absoluteTick: 0),
       ]),
     );
 
@@ -44,11 +40,7 @@ void main() {
       ticksEngine: TicksEngine(),
       scoreEngine: ScoreEngine(),
       musicScore: _score([
-        NoteModel(
-          pitch: 'C4',
-          duration: NoteDuration.quarter,
-          absoluteTick: 0,
-        ),
+        NoteModel(pitch: 'C4', duration: NoteDuration.quarter, absoluteTick: 0),
         NoteModel(
           pitch: 'C4',
           duration: NoteDuration.quarter,
@@ -71,5 +63,42 @@ void main() {
 
     expect(session.hasPlayableNotes, isFalse);
     expect(session.completionTick, 0);
+  });
+
+  test('GameSession matches enharmonic pitches', () {
+    final session = GameSession(
+      ticksEngine: TicksEngine(),
+      scoreEngine: ScoreEngine(),
+      musicScore: _score([
+        NoteModel(
+          pitch: 'C#4',
+          duration: NoteDuration.quarter,
+          absoluteTick: 0,
+        ),
+      ]),
+    );
+
+    session.start();
+
+    expect(session.handleNoteInput('Db4'), isTrue);
+  });
+
+  test('GameSession finish is idempotent', () {
+    final session = GameSession(
+      ticksEngine: TicksEngine(),
+      scoreEngine: ScoreEngine(),
+      musicScore: _score([]),
+    );
+    var finishedTransitions = 0;
+    session.onStateChange((state) {
+      if (state == GameState.finished) finishedTransitions++;
+    });
+
+    session.finish();
+    session.finish();
+    session.finish();
+
+    expect(session.isFinished, isTrue);
+    expect(finishedTransitions, 1);
   });
 }

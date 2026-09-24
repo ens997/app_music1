@@ -1,5 +1,6 @@
 import 'dart:math';
 import 'enumerations.dart';
+import '../musical_engine/pitch_utils.dart';
 
 /// Modelo que representa una nota individual en la secuencia musical
 class NoteModel {
@@ -70,23 +71,14 @@ class NoteModel {
   /// Obtiene numero MIDI (0-127)
   /// La4 (440 Hz) = MIDI 69
   int getMidiNumber() {
-    const noteToPitch = {
-      'C': 0,
-      'D': 2,
-      'E': 4,
-      'F': 5,
-      'G': 7,
-      'A': 9,
-      'B': 11,
-    };
-
-    final noteNameFirst = pitch.substring(0, 1);
-    int basePitch = noteToPitch[noteNameFirst] ?? 0;
-
-    if (pitch.contains('#')) basePitch += 1;
-    if (pitch.contains('b')) basePitch -= 1;
-
-    return (octave + 1) * 12 + basePitch;
+    final midi = PitchUtils.toMidi(pitch);
+    if (midi != null) {
+      final parsed = PitchUtils.parse(pitch);
+      return parsed != null && parsed.accidental.isEmpty
+          ? midi + accidental.semitoneDelta
+          : midi;
+    }
+    return 60;
   }
 
   /// Calcula desviacion en ticks respecto al tiempo target

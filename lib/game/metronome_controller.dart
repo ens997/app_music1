@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../core/core.dart';
 import '../audio/piano_audio_service.dart';
 
@@ -11,7 +13,7 @@ class MetronomeController {
   bool _isEnabled = false;
   double _volume = 0.5;
   int _currentBeat = 0; // 0-based (0 es beat 1)
-  int _lastBeatTick = -1; // Evita reproducir dos veces el mismo beat
+  int? _lastBeatIndex;
 
   // Volúmenes del metrónomo (para clicks de percusión pura)
   double _accentVolume = 0.0;
@@ -40,7 +42,7 @@ class MetronomeController {
   /// Inicia el metrónomo
   void start() {
     _isEnabled = true;
-    _lastBeatTick = -1;
+    _lastBeatIndex = null;
     // El primer sonido se reproducirá en el próximo update()
   }
 
@@ -126,18 +128,20 @@ class MetronomeController {
     final ticksPerBeat = _getTicksPerBeat();
     final currentTick = ticksEngine.currentTick;
 
-    // Calcular beat actual (0-based)
-    final beatInMeasure = (currentTick ~/ ticksPerBeat) % timeSignature.numerator;
+    final currentBeatIndex = currentTick ~/ ticksPerBeat;
+    final firstBeatIndex = _lastBeatIndex == null ? 0 : _lastBeatIndex! + 1;
 
-    // Detectar si pasamos a un nuevo beat (evitar reproducir dos veces)
-    if (currentTick ~/ ticksPerBeat != _lastBeatTick ~/ ticksPerBeat) {
-      _lastBeatTick = currentTick;
+    for (
+      var beatIndex = firstBeatIndex;
+      beatIndex <= currentBeatIndex;
+      beatIndex++
+    ) {
+      final beatInMeasure = beatIndex % timeSignature.numerator;
       _currentBeat = beatInMeasure;
-
-      // Reproducir sonido del metrónomo
-      final isAccent = _isAccentBeat(beatInMeasure);
-      await _playMetronomeSound(isAccent);
+      unawaited(_playMetronomeSound(_isAccentBeat(beatInMeasure)));
     }
+
+    _lastBeatIndex = currentBeatIndex;
   }
 
   /// Obtiene información de debug sobre el estado actual del metrónomo

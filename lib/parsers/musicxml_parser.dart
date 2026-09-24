@@ -14,14 +14,17 @@ class MusicXMLParser {
       final score = document.getElement('score-partwise');
 
       if (score == null) {
-        throw FormatException('Formato MusicXML no reconocido (falta <score-partwise>)');
+        throw FormatException(
+          'Formato MusicXML no reconocido (falta <score-partwise>)',
+        );
       }
 
       final work = score.getElement('work');
       final title = work?.getElement('work-title')?.text.trim() ?? 'Untitled';
 
       final identification = score.getElement('identification');
-      final composer = identification
+      final composer =
+          identification
               ?.findElements('creator')
               .firstWhere(
                 (node) => node.getAttribute('type') == 'composer',
@@ -57,8 +60,10 @@ class MusicXMLParser {
 
           final time = attributes.getElement('time');
           if (time != null) {
-            final beats = int.tryParse(time.getElement('beats')?.text ?? '') ?? 4;
-            final beatType = int.tryParse(time.getElement('beat-type')?.text ?? '') ?? 4;
+            final beats =
+                int.tryParse(time.getElement('beats')?.text ?? '') ?? 4;
+            final beatType =
+                int.tryParse(time.getElement('beat-type')?.text ?? '') ?? 4;
             timeSignature = TimeSignature(beats, beatType);
           }
 
@@ -91,6 +96,7 @@ class MusicXMLParser {
 
           String pitchName = 'C';
           int octave = 4;
+          int pitchAlter = 0;
           Accidental accidental = Accidental.natural;
           bool displayAccidental = false;
 
@@ -98,25 +104,30 @@ class MusicXMLParser {
             final pitch = note.getElement('pitch');
             if (pitch != null) {
               pitchName = pitch.getElement('step')?.text.trim() ?? 'C';
-              octave = int.tryParse(pitch.getElement('octave')?.text ?? '') ?? 4;
+              octave =
+                  int.tryParse(pitch.getElement('octave')?.text ?? '') ?? 4;
 
               final alterText = pitch.getElement('alter')?.text;
               if (alterText != null) {
                 displayAccidental = true;
-                final alter = int.tryParse(alterText) ?? 0;
-                if (alter == 1) {
+                pitchAlter = int.tryParse(alterText) ?? 0;
+                if (pitchAlter == 1) {
                   accidental = Accidental.sharp;
-                } else if (alter == -1) {
+                } else if (pitchAlter == -1) {
                   accidental = Accidental.flat;
-                } else if (alter == 2) {
+                } else if (pitchAlter == 2) {
                   accidental = Accidental.doubleSharp;
-                } else if (alter == -2) {
+                } else if (pitchAlter == -2) {
                   accidental = Accidental.doubleFlat;
                 }
               }
             }
 
-            final accidentalText = note.getElement('accidental')?.text.trim().toLowerCase();
+            final accidentalText = note
+                .getElement('accidental')
+                ?.text
+                .trim()
+                .toLowerCase();
             if (accidentalText != null && accidentalText.isNotEmpty) {
               displayAccidental = true;
               accidental = _accidentalFromMusicXml(accidentalText);
@@ -128,7 +139,11 @@ class MusicXMLParser {
           final durationDivisions = int.tryParse(durationText ?? '') ?? 0;
 
           final typeText = note.getElement('type')?.text.trim().toLowerCase();
-          final durationEnum = _durationFromType(typeText, durationDivisions, divisions);
+          final durationEnum = _durationFromType(
+            typeText,
+            durationDivisions,
+            divisions,
+          );
           final isDotted = note.getElement('dot') != null;
 
           // Leer todos los niveles de barras. MusicXML usa number="1" para
@@ -136,7 +151,8 @@ class MusicXMLParser {
           BeamType beamType = BeamType.none;
           final beamLevels = <int, BeamType>{};
           for (final beamElement in note.findElements('beam')) {
-            final level = int.tryParse(beamElement.getAttribute('number') ?? '1') ?? 1;
+            final level =
+                int.tryParse(beamElement.getAttribute('number') ?? '1') ?? 1;
             final beamText = beamElement.text.trim().toLowerCase();
             final parsedBeamType = switch (beamText) {
               'begin' => BeamType.begin,
@@ -155,8 +171,11 @@ class MusicXMLParser {
           final ticksPerDivision = (TicksEngine.tpnq / divisions);
           final durationTicks = (durationDivisions * ticksPerDivision).round();
 
-          // Nombre pitch completo
-          final pitchFull = '$pitchName$octave';
+          // El pitch conserva el alter semántico; accidental queda disponible
+          // para decidir cómo se dibuja la notación.
+          final pitchFull = pitchAlter == 0
+              ? '$pitchName$octave'
+              : '$pitchName${pitchAlter > 0 ? '#' * pitchAlter : 'b' * -pitchAlter}$octave';
 
           final noteModel = NoteModel(
             pitch: pitchFull,
@@ -222,10 +241,14 @@ class MusicXMLParser {
         // Fallback por duración relativa usando divisiones
         final ticksPerDivision = (TicksEngine.tpnq / divisions);
         final ticks = durationDivisions * ticksPerDivision;
-        if (ticks >= NoteDuration.whole.getTicksAtTPQN480()) return NoteDuration.whole;
-        if (ticks >= NoteDuration.half.getTicksAtTPQN480()) return NoteDuration.half;
-        if (ticks >= NoteDuration.quarter.getTicksAtTPQN480()) return NoteDuration.quarter;
-        if (ticks >= NoteDuration.eighth.getTicksAtTPQN480()) return NoteDuration.eighth;
+        if (ticks >= NoteDuration.whole.getTicksAtTPQN480())
+          return NoteDuration.whole;
+        if (ticks >= NoteDuration.half.getTicksAtTPQN480())
+          return NoteDuration.half;
+        if (ticks >= NoteDuration.quarter.getTicksAtTPQN480())
+          return NoteDuration.quarter;
+        if (ticks >= NoteDuration.eighth.getTicksAtTPQN480())
+          return NoteDuration.eighth;
         return NoteDuration.sixteenth;
     }
   }
@@ -294,6 +317,7 @@ class MeasureHandler {
   // TODO: Procesar notas dentro del compás
   // TODO: Calcular timing absoluto
 }
+
 MusicScore parseMusicXmlInBackground(String xmlContent) {
   return MusicXMLParser.parse(xmlContent);
 }

@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:app_music1/core/core.dart';
 import 'package:app_music1/parsers/parsers.dart';
 
 void main() {
@@ -74,5 +75,27 @@ void main() {
     final second = score.notes[1];
     expect(second.isRest, true);
     expect(second.absoluteTick, first.absoluteTick + first.durationTicks);
+  });
+
+  test('MusicXMLParser preserves pitch alterations in the internal pitch', () {
+    const xml = '''
+<score-partwise>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions></attributes>
+      <note><pitch><step>C</step><alter>2</alter><octave>4</octave></pitch><duration>1</duration></note>
+      <note><pitch><step>D</step><alter>-1</alter><octave>4</octave></pitch><duration>1</duration></note>
+    </measure>
+  </part>
+</score-partwise>
+''';
+
+    final score = MusicXMLParser.parse(xml);
+
+    expect(score.notes[0].pitch, 'C##4');
+    expect(score.notes[0].getMidiNumber(), 62);
+    expect(score.notes[1].pitch, 'Db4');
+    expect(score.notes[1].getMidiNumber(), 61);
+    expect(score.notes[1].accidental, Accidental.flat);
   });
 }

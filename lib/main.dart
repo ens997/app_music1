@@ -4,8 +4,11 @@ import 'package:provider/provider.dart';
 import 'screens/screens.dart';
 import 'providers/exercise_provider.dart'; // <-- Importa el provider
 import 'core/core.dart'; // <-- Necesario para ExerciseStats
+import 'services/latency_settings_service.dart';
 
-void main() {
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await LatencySettingsService.load();
   runApp(
     ChangeNotifierProvider(
       create: (_) => ExerciseProvider()..loadExercises(),
@@ -103,9 +106,9 @@ class _HomeScreenState extends State<HomeScreen> {
                 Text(
                   'Sistema avanzado de entrenamiento musical con ejercicios '
                   'precargados, metrónomo automático y análisis de precisión rítmica.',
-                  style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                        color: Colors.grey[400],
-                      ),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyLarge?.copyWith(color: Colors.grey[400]),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 48),
@@ -117,17 +120,18 @@ class _HomeScreenState extends State<HomeScreen> {
                   description: exerciseProvider.isLoading
                       ? 'Cargando ejercicios...'
                       : exerciseProvider.error != null
-                          ? '⚠️ ${exerciseProvider.error}'
-                          : exercises.isEmpty
-                              ? '📂 No hay ejercicios disponibles'
-                              : '📚 ${exercises.length} ejercicios listos para practicar',
+                      ? '⚠️ ${exerciseProvider.error}'
+                      : exercises.isEmpty
+                      ? '📂 No hay ejercicios disponibles'
+                      : '📚 ${exercises.length} ejercicios listos para practicar',
                   onPressed: exerciseProvider.isLoading
                       ? null
                       : () {
                           Navigator.push(
                             context,
                             MaterialPageRoute(
-                              builder: (_) => ExerciseSelectionScreen(), // <-- SIN const
+                              builder: (_) =>
+                                  ExerciseSelectionScreen(), // <-- SIN const
                             ),
                           );
                         },
@@ -215,17 +219,17 @@ class _HomeScreenState extends State<HomeScreen> {
                     Text(
                       title,
                       style: Theme.of(context).textTheme.titleLarge?.copyWith(
-                            color: isPrimary
-                                ? Theme.of(context).colorScheme.primary
-                                : null,
-                          ),
+                        color: isPrimary
+                            ? Theme.of(context).colorScheme.primary
+                            : null,
+                      ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       description,
-                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                            color: Colors.grey[500],
-                          ),
+                      style: Theme.of(
+                        context,
+                      ).textTheme.bodySmall?.copyWith(color: Colors.grey[500]),
                     ),
                   ],
                 ),
@@ -289,15 +293,15 @@ class _HomeScreenState extends State<HomeScreen> {
         const SizedBox(height: 4),
         Text(
           value,
-          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                fontWeight: FontWeight.bold,
-              ),
+          style: Theme.of(
+            context,
+          ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
         ),
         Text(
           label,
-          style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: Colors.grey[500],
-              ),
+          style: Theme.of(
+            context,
+          ).textTheme.bodySmall?.copyWith(color: Colors.grey[500]),
         ),
       ],
     );

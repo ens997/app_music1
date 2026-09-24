@@ -48,6 +48,7 @@ class GameAudioTrackController {
       _source = source;
       await _player.setReleaseMode(ReleaseMode.stop);
       await _player.setVolume(_volume);
+      await _player.setSource(source);
       return;
     }
   }
@@ -62,7 +63,10 @@ class GameAudioTrackController {
     return prepare('$directory/$fileName', volume: volume);
   }
 
-  /// Comienza la pista desde el inicio sin bloquear el ciclo de juego.
+  /// Comienza la pista desde el inicio.
+  ///
+  /// La llamada se completa cuando la plataforma acepta la reproducción, por
+  /// lo que sirve como barrera antes de iniciar el reloj visual del ejercicio.
   Future<void> playFromStart() async {
     if (_isDisposed || _source == null) return;
     try {
