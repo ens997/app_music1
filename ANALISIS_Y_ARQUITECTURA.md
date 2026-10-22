@@ -17,7 +17,7 @@ La aplicación funciona como entrenador musical orientado a:
 ## Arquitectura real implementada
 
 ### Capa 1: UI
-La interfaz se encuentra en el directorio [lib/screens](lib/screens), con pantallas principales como:
+Las pantallas de flujo se encuentran en [lib/screens](lib/screens). `HomeScreen` está definida en [lib/main.dart](lib/main.dart); las pantallas principales incluyen:
 
 - `HomeScreen`
 - `ExerciseSelectionScreen`
@@ -37,6 +37,9 @@ Responsabilidades actuales:
 - indicar estado de carga y errores
 - seleccionar un ejercicio activo
 - devolver estadísticas calculadas
+
+El progreso de ejercicios se mantiene en memoria; los valores de latencia, en
+cambio, se guardan mediante preferencias.
 
 ### Capa 3: Dominio musical (core)
 El dominio musical está en [lib/core](lib/core), reagrupado en:
@@ -70,6 +73,10 @@ La lógica del juego se centraliza en [lib/game/game_session.dart](lib/game/game
 
 También se usa [lib/game/metronome_controller.dart](lib/game/metronome_controller.dart) para controlar el pulso del ejercicio.
 
+[lib/game/run_completion.dart](lib/game/run_completion.dart) contiene la política
+de cierre: actualiza estadísticas cuando hay un ejercicio del catálogo y
+solicita resultados para cualquier partida.
+
 ### Capa 5: Parser MusicXML
 El parseo del contenido musical se hace en [lib/parsers/musicxml_parser.dart](lib/parsers/musicxml_parser.dart).
 
@@ -80,6 +87,10 @@ Responsabilidades actuales:
 - convertir notas en objetos internos
 - calcular duración en ticks
 - soportar rest, alteraciones y tipos de nota
+
+El alcance actual es `score-partwise` y eventos secuenciales de la primera
+parte. No se modelan acordes, voces simultáneas ni movimientos `<backup>` o
+`<forward>`. Los ejercicios incluidos se prueban contra este contrato.
 
 Esto permite que la resta del sistema trabaje con un modelo propio en lugar de depender directamente del formato externo.
 
@@ -110,10 +121,13 @@ En [lib/audio](lib/audio) se implementa la parte sonora:
 - servicio para notas de piano
 - control del audio asociado a la sesión de juego
 
+El metrónomo depende de [lib/audio/metronome_audio_output.dart](lib/audio/metronome_audio_output.dart), una interfaz implementada por `PianoAudioService`; así, las pruebas pueden sustituir la salida sin inicializar plugins nativos.
+
 ### Capa 8: Servicios y carga de datos
 Los servicios se ubican en [lib/services](lib/services), sobre todo:
 
 - `ExerciseLoaderService`: carga ejercicios desde `assets/exercises`
+- `GameContentLoader`: resuelve y parsea contenido precargado, local o desde assets
 - `MusicXmlPreloadService`: apoyo para precarga de archivos XML
 
 ## Relación entre módulos
@@ -122,14 +136,12 @@ La relación actual del sistema es la siguiente:
 
 ```text
 UI / Screens
-    ↓
-Providers
-    ↓
-GameSession / Core / Musical Logic
-    ↓
-MusicXMLParser
-    ↓
-Visual Engine + Audio
+  ├── ExerciseProvider (catálogo y selección)
+  └── GameContentLoader → MusicXMLParser → GameSession / Core
+                  ↓                  ↓
+                MusicScore       MetronomeAudioOutput
+                  ↓                  ↓
+             Visual Engine         PianoAudioService
 ```
 
 Es decir, la pantalla dispara acciones y observa cambios de estado; el `GameSession` resuelve la lógica; el parser convierte el contenido musical; y las capas visual y de audio se encargan de la representación y sonido.

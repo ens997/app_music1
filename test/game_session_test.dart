@@ -14,6 +14,21 @@ MusicScore _score(List<NoteModel> notes) {
   );
 }
 
+GameSession _sessionWithNotes(List<String> pitches) {
+  return GameSession(
+    ticksEngine: TicksEngine(),
+    scoreEngine: ScoreEngine(),
+    musicScore: _score([
+      for (final pitch in pitches)
+        NoteModel(
+          pitch: pitch,
+          duration: NoteDuration.quarter,
+          absoluteTick: 0,
+        ),
+    ]),
+  );
+}
+
 void main() {
   test('GameSession ignores rests as input targets', () {
     final session = GameSession(
@@ -100,5 +115,62 @@ void main() {
 
     expect(session.isFinished, isTrue);
     expect(finishedTransitions, 1);
+  });
+
+  test('finish counts unresolved notes as misses', () {
+    final session = _sessionWithNotes(['C4', 'D4', 'E4', 'F4']);
+    session.start();
+
+    expect(session.handleNoteInput('C4'), isTrue);
+    session.finish();
+
+    expect(session.scoreEngine.hitCount, 1);
+    expect(session.scoreEngine.missCount, 3);
+    expect(session.scoreEngine.getAccuracy(), 25.0);
+    expect(session.currentCombo, 0);
+    expect(session.hitHistory, [
+      HitQuality.perfect,
+      HitQuality.miss,
+      HitQuality.miss,
+      HitQuality.miss,
+    ]);
+  });
+
+  test('finish does not count unresolved notes twice', () {
+    final session = _sessionWithNotes(['C4', 'D4']);
+
+    session.finish();
+    session.finish();
+
+    expect(session.scoreEngine.hitCount, 0);
+    expect(session.scoreEngine.missCount, 2);
+    expect(session.scoreEngine.getAccuracy(), 0.0);
+  });
+
+  test('finish preserves a perfect score when every note was hit', () {
+    final session = _sessionWithNotes(['C4', 'D4', 'E4', 'F4']);
+    session.start();
+
+    for (final pitch in ['C4', 'D4', 'E4', 'F4']) {
+      expect(session.handleNoteInput(pitch), isTrue);
+    }
+    session.finish();
+
+    expect(session.scoreEngine.hitCount, 4);
+    expect(session.scoreEngine.missCount, 0);
+    expect(session.scoreEngine.getAccuracy(), 100.0);
+  });
+
+  test('finish retains misses caused by incorrect pitch', () {
+    final session = _sessionWithNotes(['C4', 'D4', 'E4', 'F4']);
+    session.start();
+
+    expect(session.handleNoteInput('C#4'), isFalse);
+    expect(session.handleNoteInput('D4'), isTrue);
+    session.finish();
+
+    expect(session.scoreEngine.hitCount, 1);
+    expect(session.scoreEngine.missCount, 3);
+    expect(session.scoreEngine.getAccuracy(), 25.0);
   });
 }

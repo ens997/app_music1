@@ -89,8 +89,8 @@ class SMuFLRenderer extends CustomPainter {
     this.backgroundColor = const Color(0xFFFFFFFF),
     this.staffColor = Colors.black87,
     this.noteColor = Colors.black,
-  })  : scrollOffsetListenable = scrollOffsetListenable,
-        super(repaint: repaint) {
+  }) : scrollOffsetListenable = scrollOffsetListenable,
+       super(repaint: repaint) {
     _barLineXPositions = _calculateBarLineXPositions();
     _beamGroups = _groupBeamedNotes(noteLayouts);
   }
@@ -175,7 +175,11 @@ class SMuFLRenderer extends CustomPainter {
     // Clave musical
     final clefCenterY = topMargin + 2 * sr.StaffRenderer.SPACE_HEIGHT;
     final clefCenterX = leftMargin + 30;
-    sr.StaffRenderer.drawClef(canvas, Offset(clefCenterX, clefCenterY), clefType);
+    sr.StaffRenderer.drawClef(
+      canvas,
+      Offset(clefCenterX, clefCenterY),
+      clefType,
+    );
 
     // Armadura
     if (showKeySignature && keySignature != null) {
@@ -196,7 +200,8 @@ class SMuFLRenderer extends CustomPainter {
           sr.StaffRenderer.clefRightEdge(clefCenterX, clefType) +
           sr.StaffRenderer.CLEF_TO_KEY_SIGNATURE_GAP;
       final maxKeyWidth = sr.StaffRenderer.maxKeySignatureLayoutWidth();
-      final timeSigX = keySigStartX + maxKeyWidth + sr.StaffRenderer.KEY_SIGNATURE_TIME_GAP;
+      final timeSigX =
+          keySigStartX + maxKeyWidth + sr.StaffRenderer.KEY_SIGNATURE_TIME_GAP;
       sr.StaffRenderer.drawTimeSignature(
         canvas,
         Offset(timeSigX, clefCenterY - 22),
@@ -259,22 +264,15 @@ class SMuFLRenderer extends CustomPainter {
 
   void _drawBeams(Canvas canvas) {
     final currentScrollOffset = scrollOffsetListenable?.value ?? scrollOffset;
-    final groups = currentScrollOffset != null && viewportWidth != null
-      ? _beamGroups
-        .map((group) => group
-          .where(
-            (layout) =>
-              layout.position.dx >= currentScrollOffset - _cullingMargin &&
-              layout.position.dx <=
-                currentScrollOffset + viewportWidth! + _cullingMargin,
-          )
-          .toList())
-        .where((group) => group.isNotEmpty)
-        .toList()
-      : _beamGroups;
-    if (groups.isEmpty) return;
+    final double? visibleStart =
+        currentScrollOffset == null || viewportWidth == null
+        ? null
+        : currentScrollOffset - _cullingMargin;
+    final double? visibleEnd =
+        currentScrollOffset == null || viewportWidth == null
+        ? null
+        : currentScrollOffset + viewportWidth! + _cullingMargin;
 
-    // Pinceles para stems y beams (estáticos)
     final stemPaint = Paint()
       ..color = Colors.black87
       ..strokeWidth = 2.0
@@ -285,16 +283,23 @@ class SMuFLRenderer extends CustomPainter {
       ..strokeCap = StrokeCap.butt
       ..style = PaintingStyle.stroke;
 
-    for (final group in groups) {
+    for (final group in _beamGroups) {
       if (group.length < 2) continue;
+      if (visibleStart != null && visibleEnd != null) {
+        final firstX = group.first.position.dx;
+        final lastX = group.last.position.dx;
+        if (lastX < visibleStart || firstX > visibleEnd) continue;
+      }
 
       // Extraer offsets de las notas (posición de la cabeza)
       final noteOffsets = group.map((l) => l.position).toList();
 
       // Determinar dirección del stem (basado en posición media)
-      final avgPosition = group
-          .map((l) => _staffPositionForNote(l.note))
-          .reduce((a, b) => a + b) / group.length;
+      final avgPosition =
+          group
+              .map((l) => _staffPositionForNote(l.note))
+              .reduce((a, b) => a + b) /
+          group.length;
       final stemUp = avgPosition >= 4;
       final stemDirection = stemUp ? -1.0 : 1.0;
 
@@ -307,8 +312,12 @@ class SMuFLRenderer extends CustomPainter {
       final naturalFirstBeamY = firstPos.dy + (stemDirection * baseStemLength);
       final naturalLastBeamY = lastPos.dy + (stemDirection * baseStemLength);
       final maxBeamDelta = 12.0;
-      final clampedLastBeamY = naturalFirstBeamY +
-          (naturalLastBeamY - naturalFirstBeamY).clamp(-maxBeamDelta, maxBeamDelta);
+      final clampedLastBeamY =
+          naturalFirstBeamY +
+          (naturalLastBeamY - naturalFirstBeamY).clamp(
+            -maxBeamDelta,
+            maxBeamDelta,
+          );
 
       // Dibujar stems individuales
       for (int i = 0; i < group.length; i++) {
@@ -345,7 +354,12 @@ class SMuFLRenderer extends CustomPainter {
       for (int level = 2; level <= maxBeamLevel; level++) {
         final levelOffset = _beamLevelOffset(stemDirection, level);
         for (int i = 0; i < group.length - 1; i++) {
-          if (!_hasContinuousBeamBetween(group[i].note, group[i + 1].note, level)) continue;
+          if (!_hasContinuousBeamBetween(
+            group[i].note,
+            group[i + 1].note,
+            level,
+          ))
+            continue;
           final startX = noteOffsets[i].dx + (stemUp ? 8 : -8);
           final endX = noteOffsets[i + 1].dx + (stemUp ? 8 : -8);
           final startY = _beamYAtX(
@@ -364,7 +378,11 @@ class SMuFLRenderer extends CustomPainter {
             clampedLastBeamY,
             levelOffset,
           );
-          canvas.drawLine(Offset(startX, startY), Offset(endX, endY), beamPaint);
+          canvas.drawLine(
+            Offset(startX, startY),
+            Offset(endX, endY),
+            beamPaint,
+          );
         }
 
         // Hooks (ganchos) para notas sueltas en el nivel
@@ -372,8 +390,12 @@ class SMuFLRenderer extends CustomPainter {
           final note = group[i].note;
           final beamType = _effectiveBeamType(note, level);
           if (beamType == BeamType.none) continue;
-          final hasLeft = i > 0 && _hasContinuousBeamBetween(group[i-1].note, note, level);
-          final hasRight = i < group.length - 1 && _hasContinuousBeamBetween(note, group[i+1].note, level);
+          final hasLeft =
+              i > 0 &&
+              _hasContinuousBeamBetween(group[i - 1].note, note, level);
+          final hasRight =
+              i < group.length - 1 &&
+              _hasContinuousBeamBetween(note, group[i + 1].note, level);
           if (hasLeft || hasRight) continue;
 
           final startX = noteOffsets[i].dx + (stemUp ? 8 : -8);
@@ -381,7 +403,10 @@ class SMuFLRenderer extends CustomPainter {
           final endX = switch (beamType) {
             BeamType.backwardHook => startX - hookLength,
             BeamType.forwardHook => startX + hookLength,
-            _ => (i == group.length - 1) ? startX - hookLength : startX + hookLength,
+            _ =>
+              (i == group.length - 1)
+                  ? startX - hookLength
+                  : startX + hookLength,
           };
           final startY = _beamYAtX(
             startX,
@@ -399,7 +424,11 @@ class SMuFLRenderer extends CustomPainter {
             clampedLastBeamY,
             levelOffset,
           );
-          canvas.drawLine(Offset(startX, startY), Offset(endX, endY), beamPaint);
+          canvas.drawLine(
+            Offset(startX, startY),
+            Offset(endX, endY),
+            beamPaint,
+          );
         }
       }
     }
@@ -420,7 +449,8 @@ class SMuFLRenderer extends CustomPainter {
       if (note.beamType == BeamType.begin) {
         currentGroup = [layout];
         groups.add(currentGroup);
-      } else if (note.beamType == BeamType.continuation || note.beamType == BeamType.end) {
+      } else if (note.beamType == BeamType.continuation ||
+          note.beamType == BeamType.end) {
         if (currentGroup != null) {
           currentGroup.add(layout);
         } else {
@@ -451,7 +481,9 @@ class SMuFLRenderer extends CustomPainter {
         maxLevel = entry.key;
       }
     }
-    if (maxLevel == 1 && note.duration == NoteDuration.sixteenth && note.beamType.isBeamed) {
+    if (maxLevel == 1 &&
+        note.duration == NoteDuration.sixteenth &&
+        note.beamType.isBeamed) {
       maxLevel = 2;
     }
     return maxLevel == 0 ? 1 : maxLevel;
@@ -461,7 +493,9 @@ class SMuFLRenderer extends CustomPainter {
     if (level == 1) return note.beamType;
     final beamType = note.beamLevels[level];
     if (beamType != null) return beamType;
-    if (level == 2 && note.duration == NoteDuration.sixteenth && note.beamType.isBeamed) {
+    if (level == 2 &&
+        note.duration == NoteDuration.sixteenth &&
+        note.beamType.isBeamed) {
       return BeamType.continuation;
     }
     return BeamType.none;
@@ -470,12 +504,21 @@ class SMuFLRenderer extends CustomPainter {
   bool _hasContinuousBeamBetween(NoteModel left, NoteModel right, int level) {
     final leftType = _effectiveBeamType(left, level);
     final rightType = _effectiveBeamType(right, level);
-    final leftConnectsRight = leftType == BeamType.begin || leftType == BeamType.continuation;
-    final rightConnectsLeft = rightType == BeamType.continuation || rightType == BeamType.end;
+    final leftConnectsRight =
+        leftType == BeamType.begin || leftType == BeamType.continuation;
+    final rightConnectsLeft =
+        rightType == BeamType.continuation || rightType == BeamType.end;
     return leftConnectsRight && rightConnectsLeft;
   }
 
-  double _beamYAtX(double x, double startX, double startY, double endX, double endY, double levelOffset) {
+  double _beamYAtX(
+    double x,
+    double startX,
+    double startY,
+    double endX,
+    double endY,
+    double levelOffset,
+  ) {
     if ((endX - startX).abs() < 0.001) return startY + levelOffset;
     final t = (x - startX) / (endX - startX);
     return startY + ((endY - startY) * t) + levelOffset;
@@ -512,7 +555,8 @@ class SMuFLRenderer extends CustomPainter {
     if (timeSignature == null) {
       return TicksEngine.tpnq * 4;
     }
-    return (TicksEngine.tpnq * timeSignature!.numerator * 4) ~/ timeSignature!.denominator;
+    return (TicksEngine.tpnq * timeSignature!.numerator * 4) ~/
+        timeSignature!.denominator;
   }
 
   List<double> _calculateBarLineXPositions() {

@@ -4,11 +4,13 @@ import 'package:provider/provider.dart';
 import 'screens/screens.dart';
 import 'providers/exercise_provider.dart'; // <-- Importa el provider
 import 'core/core.dart'; // <-- Necesario para ExerciseStats
+import 'services/instrument_settings_service.dart';
 import 'services/latency_settings_service.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await LatencySettingsService.load();
+  await InstrumentSettingsService.load();
   runApp(
     ChangeNotifierProvider(
       create: (_) => ExerciseProvider()..loadExercises(),

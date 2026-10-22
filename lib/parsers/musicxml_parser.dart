@@ -4,8 +4,8 @@ import 'package:xml/xml.dart';
 
 import '../core/core.dart';
 
-/// Parser para archivos MusicXML
-/// Convierte notación XML a modelo interno de la aplicación
+/// Parser para scores `score-partwise` con eventos secuenciales en la primera
+/// parte. No modela acordes, voces simultáneas ni `<backup>`/`<forward>`.
 class MusicXMLParser {
   /// Parsea contenido XML de MusicXML (formato ScorePartwise)
   static MusicScore parse(String xmlContent) {

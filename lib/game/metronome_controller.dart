@@ -1,14 +1,14 @@
 import 'dart:async';
 
 import '../core/core.dart';
-import '../audio/piano_audio_service.dart';
+import '../audio/metronome_audio_output.dart';
 
 /// Controlador del metrónomo con soporte para múltiples métricas
 /// Lee la métrica del MusicXML y genera acentos según la estructura musical
 class MetronomeController {
   final TicksEngine ticksEngine;
   final TimeSignature timeSignature;
-  final PianoAudioService audioService;
+  final MetronomeAudioOutput audioService;
 
   bool _isEnabled = false;
   double _volume = 0.5;
@@ -61,20 +61,16 @@ class MetronomeController {
 
   /// Calcula los ticks por beat según la métrica y BPM
   int _getTicksPerBeat() {
-    // El beat se define por el denominador
-    // En 4/4 y 2/4: beat = quarter note (480 ticks)
-    // En 3/4: beat = quarter note (480 ticks)
-    // En 6/8: beat = dotted quarter (720 ticks)
+    // El metrónomo emite cada figura del denominador. En 6/8, los
+    // acentos agrupan tres corcheas, pero los pulsos siguen siendo corcheas.
 
     const tpqn = 480; // Ticks per Quarter Note
 
     switch (timeSignature.denominator) {
       case 8:
-        // 6/8, 9/8: dotted quarter note como beat
-        return (tpqn * 1.5).toInt(); // 720 ticks
+        return tpqn ~/ 2;
       case 4:
       default:
-        // 2/4, 3/4, 4/4: quarter note como beat
         return tpqn;
     }
   }
@@ -96,13 +92,12 @@ class MetronomeController {
         // Acentos en beats 1 y 3 (posiciones 0 y 2)
         return beatIndex == 0 || beatIndex == 2;
 
-      case '6/8':
-        // Dos acentos principales en 6/8: beats 1 y 4
-        // (estructura: acento-débil-débil-acento-débil-débil)
-        return beatIndex == 0 || beatIndex == 3;
-
       default:
-        // Por defecto: acento solo en beat 1
+        if (timeSignature.denominator == 8) {
+          // Métricas compuestas: cada grupo de tres corcheas comienza
+          // con un acento (1 y 4 en 6/8).
+          return beatIndex % 3 == 0;
+        }
         return beatIndex == 0;
     }
   }
@@ -120,28 +115,22 @@ class MetronomeController {
     }
   }
 
-  /// Actualiza el estado del metrónomo basado en el tick actual
-  /// Se debe llamar en cada frame del game loop
-  Future<void> update() async {
-    if (!_isEnabled) return;
+  /// Actualiza el estado del metrónomo basado en el tick actual.
+  /// Un frame tardío reproduce solo el beat vigente, nunca una ráfaga de beats
+  /// ya vencidos.
+  Future<void> update() {
+    if (!_isEnabled) return Future.value();
 
     final ticksPerBeat = _getTicksPerBeat();
     final currentTick = ticksEngine.currentTick;
 
     final currentBeatIndex = currentTick ~/ ticksPerBeat;
-    final firstBeatIndex = _lastBeatIndex == null ? 0 : _lastBeatIndex! + 1;
-
-    for (
-      var beatIndex = firstBeatIndex;
-      beatIndex <= currentBeatIndex;
-      beatIndex++
-    ) {
-      final beatInMeasure = beatIndex % timeSignature.numerator;
-      _currentBeat = beatInMeasure;
-      unawaited(_playMetronomeSound(_isAccentBeat(beatInMeasure)));
-    }
+    if (_lastBeatIndex == currentBeatIndex) return Future.value();
 
     _lastBeatIndex = currentBeatIndex;
+    final beatInMeasure = currentBeatIndex % timeSignature.numerator;
+    _currentBeat = beatInMeasure;
+    return _playMetronomeSound(_isAccentBeat(beatInMeasure));
   }
 
   /// Obtiene información de debug sobre el estado actual del metrónomo

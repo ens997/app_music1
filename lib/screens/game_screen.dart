@@ -1,19 +1,21 @@
 import 'dart:async';
-import 'dart:io';
-
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 
 import '../audio/game_audio_track_controller.dart';
-import '../audio/piano_audio_service.dart';
+import '../audio/instrument_audio_registry.dart';
+import '../audio/instrument_audio_output.dart';
+import '../audio/metronome_audio_output.dart';
 import '../core/core.dart';
 import '../core/globals.dart';
 import '../game/game.dart';
+import '../game/run_completion.dart';
 import '../parsers/musicxml_parser.dart';
 import '../providers/exercise_provider.dart';
-import '../services/exercise_loader_service.dart';
+import '../services/game_content_loader.dart';
+import '../services/instrument_settings_service.dart';
 import '../visual_engine/visual_engine.dart';
 
 class GameScreen extends StatefulWidget {
@@ -21,6 +23,11 @@ class GameScreen extends StatefulWidget {
   final String? preloadedContent;
   final String? fileName;
   final Exercise? exercise;
+  final TimeSource? timeSource;
+
+  /// Optional audio backend. The screen initializes and disposes this instance.
+  final InstrumentAudioOutput? instrumentAudioOutput;
+  final MetronomeAudioOutput? metronomeAudioOutput;
 
   const GameScreen({
     Key? key,
@@ -28,6 +35,9 @@ class GameScreen extends StatefulWidget {
     this.preloadedContent,
     this.fileName,
     this.exercise,
+    this.timeSource,
+    this.instrumentAudioOutput,
+    this.metronomeAudioOutput,
   }) : super(key: key);
 
   @override
@@ -39,7 +49,7 @@ class _GameScreenState extends State<GameScreen>
   final AnimationManager _animationManager = AnimationManager();
   final GameAudioTrackController _gameAudioTrackController =
       GameAudioTrackController();
-  final PianoAudioService _pianoAudioService = PianoAudioService();
+  final GameContentLoader _gameContentLoader = GameContentLoader();
   static const double _basePixelsPerTick = 0.35;
   static const double _staffTop = SMuFLRenderer.compactStaffTop;
   static const double _leftMargin = 80;
@@ -48,14 +58,21 @@ class _GameScreenState extends State<GameScreen>
   late final Ticker _gameTicker;
   late final VoidCallback _scrollListener;
   late final Listenable _visualRepaint;
+  late final TimingsCallback _frameTimingsCallback;
   Duration? _lastAutoScrollFrame;
+  DateTime? _lastPerformanceReport;
+  int _profiledFrameCount = 0;
+  int _slowFrameCount = 0;
+  Duration _maxBuildDuration = Duration.zero;
+  Duration _maxRasterDuration = Duration.zero;
   bool _isPlaying = false;
   bool _isPreparing = false;
+  late final InstrumentAudioOutput _instrumentAudioOutput;
+  late final MetronomeAudioOutput _metronomeAudioOutput;
   late final Future<void> _audioInitialization;
 
   GameSession? _gameSession;
   MusicScore? _loadedScore;
-  bool _isLoading = false;
   String _status = '';
   double _currentViewportWidth = 0.0;
   bool _isLeaving = false;
@@ -77,6 +94,23 @@ class _GameScreenState extends State<GameScreen>
   @override
   void initState() {
     super.initState();
+    final defaultAudioBackend =
+        widget.instrumentAudioOutput == null &&
+            widget.metronomeAudioOutput == null
+        ? InstrumentAudioRegistry.create(
+            InstrumentSettingsService.selectedInstrument.value,
+          )
+        : null;
+    _instrumentAudioOutput =
+        widget.instrumentAudioOutput ??
+        defaultAudioBackend?.instrument ??
+        InstrumentAudioRegistry.create(
+          InstrumentSettingsService.selectedInstrument.value,
+        ).instrument;
+    _metronomeAudioOutput =
+        widget.metronomeAudioOutput ??
+        defaultAudioBackend?.metronome ??
+        const SilentMetronomeAudioOutput();
     _gameTicker = createTicker(_onGameTick);
     _scrollController = ScrollController();
     _scrollListener = () {
@@ -84,14 +118,15 @@ class _GameScreenState extends State<GameScreen>
     };
     _scrollController.addListener(_scrollListener);
     _visualRepaint = Listenable.merge([_scrollOffset, _gameRevision]);
+    _frameTimingsCallback = _recordFrameTimings;
+    SchedulerBinding.instance.addTimingsCallback(_frameTimingsCallback);
 
     noteSpacingScale.addListener(_updateNoteLayouts);
     musicStartOffsetScale.addListener(_updateNoteLayouts);
 
     _audioInitialization = _initializeAudio();
-    _audioInitialization.then((_) => _loadConfiguredContent()).catchError((e) {
-      debugPrint('Error inicializando audio: $e');
-      _loadConfiguredContent();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) unawaited(_loadConfiguredContent());
     });
   }
 
@@ -118,12 +153,15 @@ class _GameScreenState extends State<GameScreen>
     noteSpacingScale.removeListener(_updateNoteLayouts);
     musicStartOffsetScale.removeListener(_updateNoteLayouts);
     _scrollController.removeListener(_scrollListener);
+    SchedulerBinding.instance.removeTimingsCallback(_frameTimingsCallback);
     _detachGameSessionListeners();
     _gameSession?.stop();
     _gameTicker.dispose();
     _scrollController.dispose();
     unawaited(_gameAudioTrackController.dispose());
-    _pianoAudioService.dispose();
+    unawaited(
+      _audioInitialization.then((_) => _instrumentAudioOutput.dispose()),
+    );
     super.dispose();
   }
 
@@ -133,127 +171,94 @@ class _GameScreenState extends State<GameScreen>
 
   Future<void> _loadPreloadedContent(String content) async {
     setState(() {
-      _isLoading = true;
       _status = 'Cargando archivo...';
     });
     try {
-      final score = MusicXMLParser.parse(content);
+      final loadedContent = _gameContentLoader.loadPreloadedContent(
+        content,
+        exercise: widget.exercise,
+        fileName: widget.fileName,
+      );
       if (mounted) {
-        if (widget.exercise != null) {
-          await _gameAudioTrackController.prepare(widget.exercise!.assetPath);
-        } else if (widget.fileName != null) {
-          await _gameAudioTrackController.prepareFromAssetName(
-            widget.fileName!,
-          );
+        final audioTrackPath = loadedContent.audioTrackPath;
+        if (audioTrackPath != null) {
+          await _gameAudioTrackController.prepare(audioTrackPath);
         }
         if (!mounted) return;
-        setState(() {
-          _loadedScore = score;
-          _isPlaying = false;
-          _status = '';
-          _gameSession = GameSession(
-            ticksEngine: _createTicksEngine(score),
-            scoreEngine: ScoreEngine(),
-            musicScore: score,
-            audioService: _pianoAudioService,
-          );
-          _attachGameSessionListeners();
-          if (widget.exercise != null) {
-            _status =
-                '🎵 ${widget.exercise!.title} - ${widget.exercise!.composer}';
-          }
-        });
-        _updateNoteLayouts();
+        _installLoadedContent(loadedContent);
         await _prepareForPlayback();
       }
     } catch (e) {
       if (mounted) setState(() => _status = 'Error al cargar archivo: $e');
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _loadPreloadedFile(String filePath) async {
     setState(() {
-      _isLoading = true;
       _status = 'Cargando archivo...';
     });
     try {
-      final content = await File(filePath).readAsString();
-      final score = MusicXMLParser.parse(content);
+      final loadedContent = await _gameContentLoader.loadFile(filePath);
       if (mounted) {
-        await _gameAudioTrackController.prepare(filePath);
+        final audioTrackPath = loadedContent.audioTrackPath;
+        if (audioTrackPath != null) {
+          await _gameAudioTrackController.prepare(audioTrackPath);
+        }
         if (!mounted) return;
-        setState(() {
-          _loadedScore = score;
-          _isPlaying = false;
-          _status = '';
-          _gameSession = GameSession(
-            ticksEngine: _createTicksEngine(score),
-            scoreEngine: ScoreEngine(),
-            musicScore: score,
-            audioService: _pianoAudioService,
-          );
-          _attachGameSessionListeners();
-        });
-        _updateNoteLayouts();
+        _installLoadedContent(loadedContent);
         await _prepareForPlayback();
       }
     } catch (e) {
       if (mounted) setState(() => _status = 'Error al cargar archivo: $e');
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   /// Carga automáticamente el primer ejercicio disponible desde assets
   Future<void> _loadFirstExerciseAutomatically() async {
     setState(() {
-      _isLoading = true;
       _status = 'Cargando ejercicio inicial...';
     });
 
     try {
-      final loader = ExerciseLoaderService();
-      final exercises = await loader.loadExercises();
-
-      if (exercises.isEmpty) {
+      final loadedContent = await _gameContentLoader.loadFirstExercise();
+      if (loadedContent == null) {
         if (mounted) {
           setState(() => _status = 'No hay ejercicios disponibles');
         }
         return;
       }
 
-      final firstExercise = exercises.first;
-      final content = await rootBundle.loadString(firstExercise.assetPath);
-
       if (!mounted) return;
-
-      final score = MusicXMLParser.parse(content);
-      await _gameAudioTrackController.prepare(firstExercise.assetPath);
+      final audioTrackPath = loadedContent.audioTrackPath;
+      if (audioTrackPath != null) {
+        await _gameAudioTrackController.prepare(audioTrackPath);
+      }
       if (!mounted) return;
-      setState(() {
-        _loadedScore = score;
-        _isPlaying = false;
-        _status = '🎵 ${firstExercise.title} - ${firstExercise.composer}';
-        _gameSession = GameSession(
-          ticksEngine: _createTicksEngine(score),
-          scoreEngine: ScoreEngine(),
-          musicScore: score,
-          audioService: _pianoAudioService,
-        );
-        _attachGameSessionListeners();
-      });
-      _updateNoteLayouts();
+      _installLoadedContent(loadedContent);
       await _prepareForPlayback();
     } catch (e) {
       if (mounted) {
         setState(() => _status = '❌ Error cargando ejercicio: $e');
         debugPrint('Error loading first exercise: $e');
       }
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  void _installLoadedContent(GameContent loadedContent) {
+    final score = loadedContent.score;
+    setState(() {
+      _loadedScore = score;
+      _isPlaying = false;
+      _status = loadedContent.status;
+      _gameSession = GameSession(
+        ticksEngine: _createTicksEngine(score),
+        scoreEngine: ScoreEngine(),
+        musicScore: score,
+        audioService: _metronomeAudioOutput,
+      );
+      _attachGameSessionListeners();
+    });
+    _updateNoteLayouts();
   }
 
   /// Registra los listeners de GameSession comunes a todas las rutas de carga:
@@ -299,9 +304,9 @@ class _GameScreenState extends State<GameScreen>
 
   Future<void> _initializeAudio() async {
     try {
-      await _pianoAudioService.initialize();
-    } catch (_) {
-      // El juego puede continuar aunque el dispositivo no tenga audio.
+      await _instrumentAudioOutput.initialize();
+    } catch (error) {
+      debugPrint('No se pudo inicializar el audio del instrumento: $error');
     }
   }
 
@@ -353,7 +358,7 @@ class _GameScreenState extends State<GameScreen>
   double get _pixelsPerTick => _basePixelsPerTick * noteSpacingScale.value;
 
   TicksEngine _createTicksEngine(MusicScore score) {
-    return TicksEngine(initialBpm: score.bpm)
+    return TicksEngine(initialBpm: score.bpm, timeSource: widget.timeSource)
       ..audioLatencyMs = audioLatencyMs.value
       ..inputLatencyMs = inputLatencyMs.value;
   }
@@ -393,17 +398,14 @@ class _GameScreenState extends State<GameScreen>
       setState(() => _isPlaying = false);
     }
 
-    if (widget.exercise != null) {
-      final provider = context.read<ExerciseProvider>();
-      final updatedExercise = widget.exercise!.copyWith(
-        timesCompleted: widget.exercise!.timesCompleted + 1,
-        bestScore: session.currentScore > widget.exercise!.bestScore
-            ? session.currentScore.toDouble()
-            : widget.exercise!.bestScore,
-      );
-      provider.updateExercise(updatedExercise);
-      _showResultsDialog();
-    }
+    completeGameRun(
+      exercise: widget.exercise,
+      currentScore: session.currentScore,
+      onExerciseUpdated: (exercise) {
+        context.read<ExerciseProvider>().updateExercise(exercise);
+      },
+      onShowResults: _showResultsDialog,
+    );
   }
 
   Future<void> _resetAndRestart() async {
@@ -513,7 +515,7 @@ class _GameScreenState extends State<GameScreen>
       return;
     }
 
-    unawaited(session.update());
+    session.update();
 
     if (!session.hasPlayableNotes ||
         session.ticksEngine.currentTick >= session.completionTick) {
@@ -541,6 +543,65 @@ class _GameScreenState extends State<GameScreen>
     _lastAutoScrollFrame = null;
   }
 
+  void _recordFrameTimings(List<FrameTiming> timings) {
+    if ((!kDebugMode && !kProfileMode) || !_isPlaying || _isLeaving) return;
+
+    for (final timing in timings) {
+      _profiledFrameCount++;
+      final buildDuration = timing.buildDuration;
+      final rasterDuration = timing.rasterDuration;
+      final frameDuration = buildDuration + rasterDuration;
+      if (frameDuration > const Duration(milliseconds: 16)) {
+        _slowFrameCount++;
+      }
+      if (buildDuration > _maxBuildDuration) {
+        _maxBuildDuration = buildDuration;
+      }
+      if (rasterDuration > _maxRasterDuration) {
+        _maxRasterDuration = rasterDuration;
+      }
+    }
+
+    final now = DateTime.now();
+    final lastReport = _lastPerformanceReport;
+    if (lastReport != null &&
+        now.difference(lastReport) < const Duration(seconds: 5)) {
+      return;
+    }
+    _lastPerformanceReport = now;
+
+    final session = _gameSession;
+    if (session == null || _profiledFrameCount == 0) return;
+    final slowFramePercentage = (_slowFrameCount * 100 / _profiledFrameCount)
+        .toStringAsFixed(1);
+    debugPrint(
+      'PERF frames=$_profiledFrameCount slow=$slowFramePercentage% '
+      'buildMax=${_maxBuildDuration.inMilliseconds}ms '
+      'rasterMax=${_maxRasterDuration.inMilliseconds}ms '
+      'tick=${session.ticksEngine.currentTick} '
+      'scroll=${_scrollOffset.value.toStringAsFixed(1)}',
+    );
+    unawaited(_logAudioDrift(session));
+    _profiledFrameCount = 0;
+    _slowFrameCount = 0;
+    _maxBuildDuration = Duration.zero;
+    _maxRasterDuration = Duration.zero;
+  }
+
+  Future<void> _logAudioDrift(GameSession session) async {
+    final trackPosition = await _gameAudioTrackController.getCurrentPosition();
+    if (!mounted || trackPosition == null) return;
+
+    final gamePositionMs = session.ticksEngine
+        .ticksToMilliseconds(session.ticksEngine.currentTick)
+        .round();
+    final driftMs = trackPosition.inMilliseconds - gamePositionMs;
+    debugPrint(
+      'PERF_AUDIO track=${trackPosition.inMilliseconds}ms '
+      'game=${gamePositionMs}ms drift=${driftMs}ms',
+    );
+  }
+
   void _leaveGame() {
     if (_isLeaving || !mounted) return;
     _isLeaving = true;
@@ -563,10 +624,9 @@ class _GameScreenState extends State<GameScreen>
     if (!hitSucceeded) return;
 
     try {
-      await _pianoAudioService.initialize();
-      await _pianoAudioService.playNote(pitch);
-    } catch (_) {
-      // Ignorar errores de audio para no bloquear la experiencia de juego.
+      await _instrumentAudioOutput.playNote(pitch);
+    } catch (error) {
+      debugPrint('No se pudo reproducir la nota $pitch: $error');
     }
   }
 
@@ -628,6 +688,49 @@ class _GameScreenState extends State<GameScreen>
                 ),
                 const Spacer(),
                 IconButton(
+                  onPressed: () {
+                    setState(() {
+                      if (game.metronomeController.isEnabled) {
+                        game.metronomeController.stop();
+                      } else {
+                        game.metronomeController.start();
+                      }
+                    });
+                  },
+                  icon: Icon(
+                    Icons.music_note,
+                    color: game.metronomeController.isEnabled
+                        ? Theme.of(context).colorScheme.primary
+                        : Colors.grey,
+                  ),
+                  tooltip: game.metronomeController.isEnabled
+                      ? 'Desactivar metrónomo'
+                      : 'Activar metrónomo',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(
+                    minWidth: 36,
+                    minHeight: 36,
+                  ),
+                ),
+                const SizedBox(width: 4),
+                SizedBox(
+                  width: 72,
+                  child: Slider(
+                    value: game.metronomeController.volume,
+                    onChanged: (newVolume) {
+                      setState(() {
+                        game.metronomeController.setVolume(newVolume);
+                      });
+                    },
+                    min: 0.0,
+                    max: 1.0,
+                    divisions: 10,
+                    semanticFormatterCallback: (value) =>
+                        'Volumen del metrónomo: ${(value * 100).toStringAsFixed(0)}%',
+                  ),
+                ),
+                const SizedBox(width: 4),
+                IconButton(
                   onPressed: _isPlaying || _isPreparing
                       ? null
                       : _startFromBeginning,
@@ -646,107 +749,6 @@ class _GameScreenState extends State<GameScreen>
                 ),
               ],
             ),
-            const SizedBox(height: 4),
-
-            // Controles del metrónomo
-            if (_gameSession != null)
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 8,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade200,
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: Row(
-                  children: [
-                    // Icono del metrónomo
-                    Icon(
-                      Icons.music_note,
-                      size: 20,
-                      color: _gameSession!.metronomeController.isEnabled
-                          ? Theme.of(context).colorScheme.primary
-                          : Colors.grey,
-                    ),
-                    const SizedBox(width: 8),
-
-                    // Toggle del metrónomo
-                    GestureDetector(
-                      onTap: () {
-                        setState(() {
-                          if (_gameSession!.metronomeController.isEnabled) {
-                            _gameSession!.metronomeController.stop();
-                          } else {
-                            _gameSession!.metronomeController.start();
-                          }
-                        });
-                      },
-                      child: Text(
-                        _gameSession!.metronomeController.isEnabled
-                            ? 'Metrónomo ON'
-                            : 'Metrónomo OFF',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: _gameSession!.metronomeController.isEnabled
-                              ? Theme.of(context).colorScheme.primary
-                              : Colors.grey,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-
-                    // Beat actual
-                    Expanded(
-                      child: Row(
-                        children: [
-                          Text(
-                            'Beat: ${_gameSession!.metronomeController.currentBeat}/${_gameSession!.musicScore.timeSignature.numerator}',
-                            style: const TextStyle(fontSize: 12),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: LinearProgressIndicator(
-                              value:
-                                  _gameSession!
-                                      .metronomeController
-                                      .currentBeat /
-                                  _gameSession!
-                                      .musicScore
-                                      .timeSignature
-                                      .numerator,
-                              minHeight: 4,
-                              borderRadius: BorderRadius.circular(2),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-
-                    // Slider de volumen
-                    SizedBox(
-                      width: 80,
-                      child: Slider(
-                        value: _gameSession!.metronomeController.volume,
-                        onChanged: (newVolume) {
-                          setState(() {
-                            _gameSession!.metronomeController.setVolume(
-                              newVolume,
-                            );
-                          });
-                        },
-                        min: 0.0,
-                        max: 1.0,
-                        divisions: 10,
-                        label:
-                            '${(_gameSession!.metronomeController.volume * 100).toStringAsFixed(0)}%',
-                      ),
-                    ),
-                  ],
-                ),
-              ),
             const SizedBox(height: 4),
 
             // Partitura optimizada con ValueListenableBuilder y AnimatedBuilder

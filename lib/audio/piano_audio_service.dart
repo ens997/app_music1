@@ -1,19 +1,21 @@
 import 'dart:async';
 import 'dart:math' as math;
-import 'dart:typed_data';
 import 'dart:io';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:flutter_soloud/flutter_soloud.dart';
 
 import '../core/musical_engine/pitch_utils.dart';
+import 'audio_service_lifecycle.dart';
+import 'instrument_audio_output.dart';
 import 'metronome_click_generator.dart';
+import 'metronome_audio_output.dart';
 
 /// Servicio de audio optimizado para piano.
 /// - Genera ondas en Isolate (no bloquea UI).
 /// - Cachea las ondas en disco para reutilización.
-class PianoAudioService {
+class PianoAudioService implements InstrumentAudioOutput, MetronomeAudioOutput {
   static const List<String> _supportedNotes = [
     'C4',
     'C#4',
@@ -53,29 +55,28 @@ class PianoAudioService {
     'B6',
   ];
 
-  final List<AudioPlayer> _players = [];
-  final Map<String, Uint8List> _noteWaveBytes = {};
-  int _playerIndex = 0;
-  bool _initialized = false;
-  bool _isGenerating = false;
-  Completer<void>? _initializationCompleter;
+  SoLoud? _soloud;
+  final Map<String, AudioSource> _noteSources = {};
+  AudioSource? _accentClickSource;
+  AudioSource? _normalClickSource;
+  final AudioServiceLifecycle _lifecycle = AudioServiceLifecycle();
+
+  @override
+  AudioServiceState get state => _lifecycle.state;
 
   /// Inicializa el servicio (generación asíncrona en Isolate).
-  Future<void> initialize({bool forceRegenerate = false}) async {
-    if (_initialized) return;
-    if (_isGenerating) {
-      await _initializationCompleter?.future;
-      return;
-    }
+  @override
+  Future<void> initialize({bool forceRegenerate = false}) {
+    return _lifecycle.initialize(
+      () => _initializeResources(forceRegenerate: forceRegenerate),
+    );
+  }
 
-    _isGenerating = true;
-    _initializationCompleter = Completer<void>();
-
+  Future<bool> _initializeResources({required bool forceRegenerate}) async {
     try {
-      // Crear pool de reproductores
-      for (int i = 0; i < 8; i++) {
-        _players.add(AudioPlayer());
-      }
+      final soloud = SoLoud.instance;
+      _soloud = soloud;
+      await soloud.init();
 
       // Intentar cargar desde caché de disco
       final cacheDir = await getApplicationDocumentsDirectory();
@@ -88,11 +89,7 @@ class PianoAudioService {
       final notesToGenerate = <String>[];
       for (final note in _supportedNotes) {
         final file = File('${cacheFolder.path}/$note.wav');
-        if (await file.exists() && !forceRegenerate) {
-          // Cargar desde disco
-          final bytes = await file.readAsBytes();
-          _noteWaveBytes[note] = Uint8List.fromList(bytes);
-        } else {
+        if (!await file.exists() || forceRegenerate) {
           notesToGenerate.add(note);
         }
       }
@@ -106,7 +103,6 @@ class PianoAudioService {
         for (final entry in generatedBytes.entries) {
           final note = entry.key;
           final bytes = entry.value;
-          _noteWaveBytes[note] = bytes;
 
           // Guardar en disco para futuras ejecuciones
           final file = File('${cacheFolder.path}/$note.wav');
@@ -114,57 +110,98 @@ class PianoAudioService {
         }
       }
 
-      _initialized = true;
-      _isGenerating = false;
-      _initializationCompleter?.complete();
-    } catch (e) {
-      _isGenerating = false;
-      _initializationCompleter?.completeError(e);
+      final accentClickFile = File('${cacheFolder.path}/metronome_accent.wav');
+      final normalClickFile = File('${cacheFolder.path}/metronome_normal.wav');
+      if (!await accentClickFile.exists() || forceRegenerate) {
+        await accentClickFile.writeAsBytes(
+          MetronomeClickGenerator.buildClick(isAccent: true),
+        );
+      }
+      if (!await normalClickFile.exists() || forceRegenerate) {
+        await normalClickFile.writeAsBytes(
+          MetronomeClickGenerator.buildClick(isAccent: false),
+        );
+      }
+
+      for (final note in _supportedNotes) {
+        _noteSources[note] = await soloud.loadFile(
+          '${cacheFolder.path}/$note.wav',
+        );
+      }
+      _accentClickSource = await soloud.loadFile(accentClickFile.path);
+      _normalClickSource = await soloud.loadFile(normalClickFile.path);
+
+      return true;
+    } on ArgumentError catch (error) {
+      if (!error.message.toString().contains('flutter_soloud_plugin')) {
+        await _disposeResources();
+        rethrow;
+      }
+      debugPrint('El plugin de audio no está disponible: ${error.message}');
+      _soloud = null;
+      return false;
+    } catch (_) {
+      await _disposeResources();
       rethrow;
     }
   }
 
   /// Reproduce un click de metrónomo (percusión suave).
   /// isAccent: true para click de acento (más fuerte), false para click normal.
+  @override
   Future<void> playMetronomeClick({
     required bool isAccent,
     double volume = 0.85,
   }) async {
-    if (!_initialized) {
+    if (state == AudioServiceState.idle) {
       await initialize();
     }
 
-    final bytes = MetronomeClickGenerator.buildClick(isAccent: isAccent);
-    final player = _players[_playerIndex];
-    _playerIndex = (_playerIndex + 1) % _players.length;
-
-    await player.play(BytesSource(bytes), volume: volume.clamp(0.0, 1.0));
+    if (state != AudioServiceState.ready) return;
+    final source = isAccent ? _accentClickSource : _normalClickSource;
+    final soloud = _soloud;
+    if (source == null || soloud == null) return;
+    await soloud.play(source, volume: volume.clamp(0.0, 1.0));
   }
 
   /// Reproduce una nota (pool de reproductores).
+  @override
   Future<void> playNote(String note, {double volume = 0.85}) async {
-    if (!_initialized) {
+    if (state == AudioServiceState.idle) {
       await initialize();
     }
+    if (state != AudioServiceState.ready) return;
     final canonicalNote = PitchUtils.normalize(note);
-    final bytes = _noteWaveBytes[canonicalNote];
-    if (bytes == null) return;
-
-    final player = _players[_playerIndex];
-    _playerIndex = (_playerIndex + 1) % _players.length;
-
-    await player.play(BytesSource(bytes), volume: volume.clamp(0.0, 1.0));
+    final source = _noteSources[canonicalNote];
+    final soloud = _soloud;
+    if (source == null || soloud == null) return;
+    await soloud.play(source, volume: volume.clamp(0.0, 1.0));
   }
 
   /// Libera recursos.
-  Future<void> dispose() async {
-    for (final player in _players) {
-      await player.dispose();
+  @override
+  Future<void> dispose() {
+    return _lifecycle.dispose(_disposeResources);
+  }
+
+  Future<void> _disposeResources() async {
+    final soloud = _soloud;
+    if (soloud != null) {
+      for (final source in _noteSources.values) {
+        await soloud.disposeSource(source);
+      }
+      if (_accentClickSource != null) {
+        await soloud.disposeSource(_accentClickSource!);
+      }
+      if (_normalClickSource != null) {
+        await soloud.disposeSource(_normalClickSource!);
+      }
+      soloud.deinit();
     }
-    _players.clear();
-    _noteWaveBytes.clear();
-    _initialized = false;
-    _isGenerating = false;
+    _noteSources.clear();
+    _accentClickSource = null;
+    _normalClickSource = null;
+    _soloud = null;
   }
 
   /// Limpia la caché de disco (para forzar regeneración).
@@ -182,7 +219,7 @@ class PianoAudioService {
 // ============================================================
 
 /// Genera un mapa de notas -> bytes WAV en un Isolate.
-/// Recibe una lista de nombres de notas y retorna un Map<String, Uint8List>.
+/// Recibe una lista de nombres de notas y retorna sus bytes WAV por nota.
 Future<Map<String, Uint8List>> _generateWavesInBackground(
   List<String> notes,
 ) async {

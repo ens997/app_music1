@@ -1,6 +1,8 @@
+import 'dart:async';
+
 import '../core/core.dart';
 import '../parsers/musicxml_parser.dart';
-import '../audio/piano_audio_service.dart';
+import '../audio/metronome_audio_output.dart';
 import 'metronome_controller.dart';
 
 /// Sesión de juego que orquesta toda la lógica de detección de hits,
@@ -14,9 +16,6 @@ class GameSession {
 
   // Estado mutable del juego
   Set<int> _hitNoteIndices = {};
-  int _currentScore = 0;
-  int _currentCombo = 0;
-  int _maxCombo = 0;
   List<HitQuality> _hitHistory = [];
   GameState _state = GameState.idle;
   late final bool _hasPlayableNotes;
@@ -38,9 +37,9 @@ class GameSession {
   bool get isFinished => _state == GameState.finished;
 
   // Getters para estadísticas (pueden exponerse a la UI)
-  int get currentScore => _currentScore;
-  int get currentCombo => _currentCombo;
-  int get maxCombo => _maxCombo;
+  int get currentScore => scoreEngine.totalScore;
+  int get currentCombo => scoreEngine.combo;
+  int get maxCombo => scoreEngine.maxCombo;
   Set<int> get hitNoteIndices => _hitNoteIndices;
   List<HitQuality> get hitHistory => _hitHistory;
 
@@ -52,7 +51,7 @@ class GameSession {
     required this.ticksEngine,
     required this.scoreEngine,
     required this.musicScore,
-    PianoAudioService? audioService,
+    MetronomeAudioOutput? audioService,
   }) : hitWindow = HitWindow(ticksEngine) {
     // Inicializar targetTick de cada nota (por defecto es absoluteTick)
     // En el futuro, se puede ajustar para anacrusa o compensaciones
@@ -61,7 +60,7 @@ class GameSession {
     }
 
     // Inicializar metrónomo con la métrica del MusicXML
-    final audioSvc = audioService ?? PianoAudioService();
+    final audioSvc = audioService ?? const SilentMetronomeAudioOutput();
     metronomeController = MetronomeController(
       ticksEngine: ticksEngine,
       timeSignature: musicScore.timeSignature,
@@ -123,18 +122,20 @@ class GameSession {
 
   void finish() {
     if (isFinished) return;
+    _markRemainingNotesAsMissed();
     _changeState(GameState.finished);
     ticksEngine.pause();
     metronomeController.stop();
     // Notificar que el juego ha terminado (la UI mostrará resultados)
     _notifyScoreChanged();
+    _notifyNoteHit();
   }
 
   /// Actualiza el estado del juego
   /// Se debe llamar cada frame del game loop (aproximadamente 60fps)
-  Future<void> update() async {
+  void update() {
     ticksEngine.update();
-    await metronomeController.update();
+    unawaited(metronomeController.update());
   }
 
   // ============================================================
@@ -190,8 +191,8 @@ class GameSession {
       closestNote.markAsMissed();
       _hitNoteIndices.add(closestIndex);
       _advancePlayableCursor();
-      _currentCombo = 0;
-      _hitHistory.add(HitQuality.miss);
+      scoreEngine.recordMiss();
+      _appendHitHistory(HitQuality.miss);
       _notifyNoteHit();
       _notifyNoteFeedback(closestIndex, HitQuality.miss, isCorrectPitch);
       if (_nextPlayablePosition >= _playableNoteIndices.length) {
@@ -204,24 +205,20 @@ class GameSession {
 
     // 4. Actualizar puntuación y combo si la nota es correcta
     if (isCorrectPitch) {
-      // Sumar puntos según la calidad
-      _currentScore += quality.getScore();
-      _currentCombo++;
-      if (_currentCombo > _maxCombo) _maxCombo = _currentCombo;
-
       // Marcar nota como golpeada
       closestNote.markAsHit(quality, currentTick);
+      scoreEngine.recordHit(quality);
       success = true;
     } else {
       // Nota incorrecta: se pierde combo, pero no se suman puntos
-      _currentCombo = 0;
       closestNote.markAsMissed();
+      scoreEngine.recordMiss();
     }
 
     _hitNoteIndices.add(closestIndex);
     _advancePlayableCursor();
-    _hitHistory.add(quality);
-    if (_hitHistory.length > 20) _hitHistory.removeAt(0); // limitar historial
+    scoreEngine.recordDeviation(closestDeviation);
+    _appendHitHistory(isCorrectPitch ? quality : HitQuality.miss);
 
     // 5. Notificar a los listeners
     _notifyScoreChanged();
@@ -255,12 +252,34 @@ class GameSession {
     }
   }
 
+  /// Marca como falladas las notas reproducibles que no se resolvieron antes
+  /// de terminar la partida, para cerrar las estadísticas de forma consistente.
+  void _markRemainingNotesAsMissed() {
+    for (
+      var position = _nextPlayablePosition;
+      position < _playableNoteIndices.length;
+      position++
+    ) {
+      final noteIndex = _playableNoteIndices[position];
+      if (_hitNoteIndices.contains(noteIndex)) continue;
+
+      musicScore.notes[noteIndex].markAsMissed();
+      _hitNoteIndices.add(noteIndex);
+      scoreEngine.recordMiss();
+      _appendHitHistory(HitQuality.miss);
+      _notifyNoteFeedback(noteIndex, HitQuality.miss, false);
+    }
+    _advancePlayableCursor();
+  }
+
+  void _appendHitHistory(HitQuality quality) {
+    _hitHistory.add(quality);
+    if (_hitHistory.length > 20) _hitHistory.removeAt(0);
+  }
+
   void _resetGameState() {
     _hitNoteIndices.clear();
     _nextPlayablePosition = 0;
-    _currentScore = 0;
-    _currentCombo = 0;
-    _maxCombo = 0;
     _hitHistory.clear();
     // Reiniciar estado de cada nota
     for (var note in musicScore.notes) {
@@ -347,8 +366,8 @@ class GameSession {
     return '''
     GameSession:
     - State: ${_state.displayName}
-    - Score: $_currentScore
-    - Combo: $_currentCombo / $_maxCombo
+    - Score: $currentScore
+    - Combo: $currentCombo / $maxCombo
     - Hits: ${_hitNoteIndices.length}/${musicScore.notes.length}
     - Historial: ${_hitHistory.length} eventos
     ''';
