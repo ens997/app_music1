@@ -27,6 +27,25 @@ const _scoreXml = '''
 </score-partwise>
 ''';
 
+String _scoreWithManyNotes(int noteCount) {
+  final notes = List.filled(noteCount, '''
+      <note>
+        <pitch><step>C</step><octave>4</octave></pitch>
+        <duration>1</duration><type>quarter</type>
+      </note>
+    ''').join();
+  return '''
+    <score-partwise>
+      <part id="P1">
+        <measure number="1">
+          <attributes><divisions>1</divisions></attributes>
+          $notes
+        </measure>
+      </part>
+    </score-partwise>
+  ''';
+}
+
 class _FakeInstrumentAudioOutput implements InstrumentAudioOutput {
   int initializeCalls = 0;
   int disposeCalls = 0;
@@ -54,6 +73,23 @@ class _FakeInstrumentAudioOutput implements InstrumentAudioOutput {
   Future<void> dispose() async {
     disposeCalls++;
     _state = AudioServiceState.disposed;
+  }
+}
+
+class _FakeSustainedInstrumentAudioOutput extends _FakeInstrumentAudioOutput
+    implements SustainedInstrumentAudioOutput {
+  final List<String> noteEvents = [];
+  int _nextVoiceId = 0;
+
+  @override
+  Future<int?> noteOn(String pitch, {double volume = 0.85}) async {
+    noteEvents.add('on:$pitch');
+    return ++_nextVoiceId;
+  }
+
+  @override
+  Future<void> noteOff(int voiceId) async {
+    noteEvents.add('off:$voiceId');
   }
 }
 
@@ -107,6 +143,45 @@ void main() {
     expect(output.disposeCalls, 1);
   });
 
+  testWidgets('GameScreen holds and releases notes for sustained backends', (
+    tester,
+  ) async {
+    final output = _FakeSustainedInstrumentAudioOutput();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: GameScreen(
+          preloadedContent: _scoreXml,
+          timeSource: FakeTimeSource(),
+          instrumentAudioOutput: output,
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final startButton = tester.widget<IconButton>(
+      find.byWidgetPredicate(
+        (widget) => widget is IconButton && widget.tooltip == 'Iniciar',
+      ),
+    );
+    startButton.onPressed!();
+    await tester.pump();
+
+    final piano = tester.widget<PianoInput>(find.byType(PianoInput));
+    expect(piano.enabled, isTrue);
+    expect(piano.onNoteDown, isNotNull);
+    piano.onNoteDown!('C4', 1);
+    await tester.pump();
+    expect(output.noteEvents, ['on:C4']);
+
+    piano.onNoteUp!('C4', 1);
+    await tester.pump();
+    expect(output.noteEvents, ['on:C4', 'off:1']);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump();
+  });
+
   testWidgets('GameScreen loads the score while audio initializes', (
     tester,
   ) async {
@@ -136,4 +211,68 @@ void main() {
     await tester.pump();
     expect(output.disposeCalls, 1);
   });
+
+  testWidgets(
+    'auto-scroll updates do not restart scroll activity every frame',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(400, 800));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+
+      final output = _FakeInstrumentAudioOutput();
+      var scrollUpdates = 0;
+      var scrollStarts = 0;
+      var scrollEnds = 0;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NotificationListener<ScrollNotification>(
+            onNotification: (notification) {
+              if (notification.metrics.axis == Axis.horizontal) {
+                if (notification is ScrollUpdateNotification) scrollUpdates++;
+                if (notification is ScrollStartNotification) scrollStarts++;
+                if (notification is ScrollEndNotification) scrollEnds++;
+              }
+              return false;
+            },
+            child: GameScreen(
+              preloadedContent: _scoreWithManyNotes(16),
+              timeSource: FakeTimeSource(),
+              instrumentAudioOutput: output,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final startButton = tester.widget<IconButton>(
+        find.byWidgetPredicate(
+          (widget) => widget is IconButton && widget.tooltip == 'Iniciar',
+        ),
+      );
+      startButton.onPressed!();
+      await tester.pump();
+      for (var frame = 0; frame < 8; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+
+      expect(scrollUpdates, greaterThan(0));
+      expect(scrollStarts, 1);
+      expect(scrollEnds, 0);
+
+      final updatesBeforeNote = scrollUpdates;
+      final piano = tester.widget<PianoInput>(find.byType(PianoInput));
+      piano.onNotePressed('C4');
+      await tester.pump();
+      for (var frame = 0; frame < 8; frame++) {
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+
+      expect(scrollUpdates, greaterThan(updatesBeforeNote));
+      expect(scrollStarts, 1);
+      expect(scrollEnds, 0);
+
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    },
+  );
 }

@@ -13,17 +13,26 @@ import 'metronome_audio_output.dart';
 import 'metronome_click_generator.dart';
 
 abstract class SampledInstrumentAudioService
-    implements InstrumentAudioOutput, MetronomeAudioOutput {
+    implements SustainedInstrumentAudioOutput, MetronomeAudioOutput {
   SampledInstrumentAudioService({
     required InstrumentType instrument,
     required List<String> supportedNotes,
+    required Duration sustainAttack,
+    required Duration sustainLoopDuration,
   }) : _instrument = instrument,
-       _supportedNotes = List.unmodifiable(supportedNotes);
+       _supportedNotes = List.unmodifiable(supportedNotes),
+       _sustainAttack = sustainAttack,
+       _sustainLoopDuration = sustainLoopDuration;
 
   final InstrumentType _instrument;
   final List<String> _supportedNotes;
+  final Duration _sustainAttack;
+  final Duration _sustainLoopDuration;
   final AudioServiceLifecycle _lifecycle = AudioServiceLifecycle();
   final Map<String, AudioSource> _noteSources = {};
+  final Map<String, AudioSource> _sustainNoteSources = {};
+  final Map<int, SoundHandle> _heldVoices = {};
+  int _nextVoiceId = 0;
   SoLoud? _soloud;
   AudioSource? _accentClickSource;
   AudioSource? _normalClickSource;
@@ -52,9 +61,14 @@ abstract class SampledInstrumentAudioService
       }
 
       final missingNotes = <String>[];
+      final missingSustainNotes = <String>[];
       for (final note in _supportedNotes) {
-        final sampleFile = _sampleFile(cacheDirectory, note);
-        if (!await sampleFile.exists()) missingNotes.add(note);
+        if (!await _sampleFile(cacheDirectory, note).exists()) {
+          missingNotes.add(note);
+        }
+        if (!await _sustainSampleFile(cacheDirectory, note).exists()) {
+          missingSustainNotes.add(note);
+        }
       }
 
       if (missingNotes.isNotEmpty) {
@@ -64,6 +78,19 @@ abstract class SampledInstrumentAudioService
         );
         for (final entry in samples.entries) {
           await _sampleFile(
+            cacheDirectory,
+            entry.key,
+          ).writeAsBytes(entry.value, flush: true);
+        }
+      }
+      if (missingSustainNotes.isNotEmpty) {
+        final sustainSamples = await generateInstrumentSampleBatch(
+          _instrument,
+          missingSustainNotes,
+          sustained: true,
+        );
+        for (final entry in sustainSamples.entries) {
+          await _sustainSampleFile(
             cacheDirectory,
             entry.key,
           ).writeAsBytes(entry.value, flush: true);
@@ -95,6 +122,9 @@ abstract class SampledInstrumentAudioService
         _noteSources[note] = await soloud.loadFile(
           _sampleFile(cacheDirectory, note).path,
         );
+        _sustainNoteSources[note] = await soloud.loadFile(
+          _sustainSampleFile(cacheDirectory, note).path,
+        );
       }
       _accentClickSource = await soloud.loadFile(accentClickFile.path);
       _normalClickSource = await soloud.loadFile(normalClickFile.path);
@@ -117,6 +147,13 @@ abstract class SampledInstrumentAudioService
     return File('${directory.path}${Platform.pathSeparator}$note.wav');
   }
 
+  File _sustainSampleFile(Directory directory, String note) {
+    return File(
+      '${directory.path}${Platform.pathSeparator}${note}_sustain_loop_v2_'
+      '${_sustainLoopDuration.inMilliseconds}ms.wav',
+    );
+  }
+
   @override
   Future<void> playNote(String pitch, {double volume = 0.85}) async {
     if (state == AudioServiceState.idle) await initialize();
@@ -130,6 +167,44 @@ abstract class SampledInstrumentAudioService
       return;
     }
     await soloud.play(source, volume: volume.clamp(0.0, 1.0));
+  }
+
+  @override
+  Future<int?> noteOn(String pitch, {double volume = 0.85}) async {
+    if (state == AudioServiceState.idle) await initialize();
+    if (state != AudioServiceState.ready) return null;
+
+    final canonicalPitch = PitchUtils.normalize(pitch);
+    final source = _sustainNoteSources[canonicalPitch];
+    final soloud = _soloud;
+    if (source == null || soloud == null) {
+      debugPrint(
+        'No hay sample sostenido de ${_instrument.displayName} para $pitch',
+      );
+      return null;
+    }
+
+    final voice = await soloud.play(source, volume: 0, looping: true);
+    soloud.fadeVolume(voice, volume.clamp(0.0, 1.0), _sustainAttack);
+    final voiceId = ++_nextVoiceId;
+    _heldVoices[voiceId] = voice;
+    return voiceId;
+  }
+
+  @override
+  Future<void> noteOff(int voiceId) async {
+    final voice = _heldVoices.remove(voiceId);
+    final soloud = _soloud;
+    if (voice == null || soloud == null || !soloud.isInitialized) return;
+
+    const releaseDuration = Duration(milliseconds: 120);
+    if (soloud.getIsValidVoiceHandle(voice)) {
+      soloud.fadeVolume(voice, 0, releaseDuration);
+      await Future<void>.delayed(releaseDuration);
+      if (soloud.isInitialized && soloud.getIsValidVoiceHandle(voice)) {
+        await soloud.stop(voice);
+      }
+    }
   }
 
   @override
@@ -152,7 +227,18 @@ abstract class SampledInstrumentAudioService
   Future<void> _disposeResources() async {
     final soloud = _soloud;
     if (soloud != null) {
+      if (soloud.isInitialized) {
+        for (final voice in _heldVoices.values) {
+          if (soloud.getIsValidVoiceHandle(voice)) {
+            await soloud.stop(voice);
+          }
+        }
+      }
+      _heldVoices.clear();
       for (final source in _noteSources.values) {
+        await soloud.disposeSource(source);
+      }
+      for (final source in _sustainNoteSources.values) {
         await soloud.disposeSource(source);
       }
       if (_accentClickSource != null) {
@@ -164,6 +250,7 @@ abstract class SampledInstrumentAudioService
       soloud.deinit();
     }
     _noteSources.clear();
+    _sustainNoteSources.clear();
     _accentClickSource = null;
     _normalClickSource = null;
     _soloud = null;

@@ -38,6 +38,35 @@ void main() {
     expect(first, second);
   });
 
+  test('builds a phase-continuous sustain loop sample', () {
+    final sample = ViolinAudioSampleGenerator.buildSustainSample(
+      pitch: 'A4',
+      sampleRate: 8000,
+    );
+    final header = ByteData.sublistView(sample);
+    final loopSampleCount = header.getUint32(40, Endian.little) ~/ 2;
+    final firstSample = header.getInt16(44, Endian.little);
+    final nextSample = header.getInt16(46, Endian.little);
+    final lastSample = header.getInt16(
+      44 + (loopSampleCount - 1) * 2,
+      Endian.little,
+    );
+
+    expect(String.fromCharCodes(sample.sublist(0, 4)), 'RIFF');
+    expect(header.getUint32(24, Endian.little), 8000);
+    expect(
+      loopSampleCount,
+      closeTo(
+        8000 * ViolinAudioSampleGenerator.sustainLoopDurationMs ~/ 1000,
+        1,
+      ),
+    );
+    expect(
+      (firstSample - lastSample) - (nextSample - firstSample),
+      closeTo(0, 3),
+    );
+  });
+
   test('supports the violin range and rejects pitches outside it', () {
     expect(
       ViolinAudioSampleGenerator.buildSample(

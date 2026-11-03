@@ -41,9 +41,12 @@ class NoteVisual {
     ..strokeWidth = StaffRenderer.STAFF_LINE_WIDTH
     ..style = PaintingStyle.stroke;
 
-  static final TextPainter _labelPainter = TextPainter(
-    textDirection: TextDirection.ltr,
+  static const TextStyle _noteLabelStyle = TextStyle(
+    fontSize: 12,
+    color: Colors.blue,
+    fontWeight: FontWeight.w600,
   );
+  static final Map<String, TextPainter> _labelPainters = {};
 
   static void drawNote(
     Canvas canvas,
@@ -326,19 +329,14 @@ class NoteVisual {
 
   static void _drawNoteLabel(Canvas canvas, Offset position, NoteModel note) {
     final text = '${note.noteName}${note.octave}';
-    _labelPainter.text = TextSpan(
-      text: text,
-      style: const TextStyle(
-        fontSize: 12,
-        color: Colors.blue,
-        fontWeight: FontWeight.w600,
-      ),
-    );
-    _labelPainter.layout();
-    _labelPainter.paint(
-      canvas,
-      Offset(position.dx - _labelPainter.width / 2, position.dy),
-    );
+    final painter = _labelPainters.putIfAbsent(text, () {
+      final painter = TextPainter(
+        text: TextSpan(text: text, style: _noteLabelStyle),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      return painter;
+    });
+    painter.paint(canvas, Offset(position.dx - painter.width / 2, position.dy));
   }
 
   static void _drawRest(

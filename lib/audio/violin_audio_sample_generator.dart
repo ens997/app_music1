@@ -2,11 +2,14 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../core/musical_engine/pitch_utils.dart';
+import 'looping_tone_sample_generator.dart';
 import 'pcm_wav_builder.dart';
 
 class ViolinAudioSampleGenerator {
   static const int lowestMidiNote = 55;
   static const int highestMidiNote = 100;
+  static const int sustainAttackMs = 110;
+  static const int sustainLoopDurationMs = 1000;
 
   static Uint8List buildSample({
     required String pitch,
@@ -70,6 +73,31 @@ class ViolinAudioSampleGenerator {
             (random.nextDouble() * 2.0 - 1.0) * 0.009 * envelope;
         return (tone / 1.65) * envelope * 0.52 + breathAndBowNoise;
       },
+    );
+  }
+
+  static Uint8List buildSustainSample({
+    required String pitch,
+    int sampleRate = 22050,
+  }) {
+    final midiNote = PitchUtils.toMidi(pitch);
+    if (midiNote == null ||
+        midiNote < lowestMidiNote ||
+        midiNote > highestMidiNote) {
+      throw ArgumentError.value(
+        pitch,
+        'pitch',
+        'Violin samples are supported from G3 to E7',
+      );
+    }
+
+    final frequency = 440.0 * math.pow(2.0, (midiNote - 69) / 12.0).toDouble();
+    return LoopingToneSampleGenerator.build(
+      frequency: frequency,
+      sampleRate: sampleRate,
+      loopDurationMs: sustainLoopDurationMs,
+      harmonics: const [1.0, 0.65, 0.42, 0.28, 0.19, 0.12, 0.08, 0.05],
+      amplitude: 0.38,
     );
   }
 }

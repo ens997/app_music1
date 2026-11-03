@@ -68,14 +68,18 @@ class GameSession {
     );
 
     _hasPlayableNotes = musicScore.notes.any((note) => !note.isRest);
-    _playableNoteIndices = [
-      for (var i = 0; i < musicScore.notes.length; i++)
-        if (!musicScore.notes[i].isRest) i,
-    ];
+    _playableNoteIndices =
+        [
+          for (var i = 0; i < musicScore.notes.length; i++)
+            if (!musicScore.notes[i].isRest) i,
+        ]..sort((a, b) {
+          final tickOrder = musicScore.notes[a].targetTick.compareTo(
+            musicScore.notes[b].targetTick,
+          );
+          return tickOrder != 0 ? tickOrder : a.compareTo(b);
+        });
     if (_hasPlayableNotes) {
-      final lastPlayableNote = musicScore.notes.lastWhere(
-        (note) => !note.isRest,
-      );
+      final lastPlayableNote = musicScore.notes[_playableNoteIndices.last];
       _completionTick = lastPlayableNote.targetTick + hitWindow.goodWindow;
     } else {
       _completionTick = 0;
@@ -156,16 +160,30 @@ class GameSession {
     int minDeviation = 1000000; // valor muy grande
 
     _advancePlayableCursor();
-    final candidateStart = _nextPlayablePosition;
+    final earliestTick = currentTick - hitWindow.goodWindow;
+    final latestTick = currentTick + hitWindow.goodWindow;
+    var low = _nextPlayablePosition;
+    var high = _playableNoteIndices.length;
+    while (low < high) {
+      final middle = low + (high - low) ~/ 2;
+      final noteIndex = _playableNoteIndices[middle];
+      if (musicScore.notes[noteIndex].targetTick < earliestTick) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+
     for (
-      int position = candidateStart;
+      int position = low;
       position < _playableNoteIndices.length;
       position++
     ) {
       final i = _playableNoteIndices[position];
+      final note = musicScore.notes[i];
+      if (note.targetTick > latestTick) break;
       if (_hitNoteIndices.contains(i)) continue; // ya golpeada o perdida
 
-      final note = musicScore.notes[i];
       final deviation = (note.targetTick - currentTick).abs();
       if (deviation < minDeviation) {
         minDeviation = deviation;

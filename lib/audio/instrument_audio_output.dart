@@ -10,3 +10,10 @@ abstract interface class InstrumentAudioOutput {
 
   Future<void> dispose();
 }
+
+abstract interface class SustainedInstrumentAudioOutput
+    implements InstrumentAudioOutput {
+  Future<int?> noteOn(String pitch, {double volume = 0.85});
+
+  Future<void> noteOff(int voiceId);
+}

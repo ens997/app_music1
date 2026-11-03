@@ -5,13 +5,48 @@ import 'package:flutter/material.dart';
 class PianoInput extends StatelessWidget {
   /// Notas disponibles por defecto (C4 a B6)
   static const List<String> defaultNotes = [
-    'C4', 'C#4', 'D4', 'D#4', 'E4', 'F4', 'F#4', 'G4', 'G#4', 'A4', 'A#4', 'B4',
-    'C5', 'C#5', 'D5', 'D#5', 'E5', 'F5', 'F#5', 'G5', 'G#5', 'A5', 'A#5', 'B5',
-    'C6', 'C#6', 'D6', 'D#6', 'E6', 'F6', 'F#6', 'G6', 'G#6', 'A6', 'A#6', 'B6',
+    'C4',
+    'C#4',
+    'D4',
+    'D#4',
+    'E4',
+    'F4',
+    'F#4',
+    'G4',
+    'G#4',
+    'A4',
+    'A#4',
+    'B4',
+    'C5',
+    'C#5',
+    'D5',
+    'D#5',
+    'E5',
+    'F5',
+    'F#5',
+    'G5',
+    'G#5',
+    'A5',
+    'A#5',
+    'B5',
+    'C6',
+    'C#6',
+    'D6',
+    'D#6',
+    'E6',
+    'F6',
+    'F#6',
+    'G6',
+    'G#6',
+    'A6',
+    'A#6',
+    'B6',
   ];
 
   final bool enabled;
   final ValueChanged<String> onNotePressed;
+  final void Function(String pitch, int pointerId)? onNoteDown;
+  final void Function(String pitch, int pointerId)? onNoteUp;
   final double height;
   final List<String> notes;
   final Color whiteKeyColor;
@@ -22,6 +57,8 @@ class PianoInput extends StatelessWidget {
     Key? key,
     required this.enabled,
     required this.onNotePressed,
+    this.onNoteDown,
+    this.onNoteUp,
     this.height = 120,
     this.notes = defaultNotes,
     this.whiteKeyColor = Colors.white,
@@ -32,7 +69,6 @@ class PianoInput extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final whiteNotes = notes.where((n) => !_isBlack(n)).toList();
-    final blackNotes = notes.where(_isBlack).toList();
 
     return Container(
       decoration: BoxDecoration(
@@ -53,22 +89,37 @@ class PianoInput extends StatelessWidget {
                     padding: const EdgeInsets.symmetric(horizontal: 2),
                     child: SizedBox(
                       width: 44,
-                      child: ElevatedButton(
-                        onPressed: enabled ? () => onNotePressed(note) : null,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: whiteKeyColor,
-                          foregroundColor: Colors.black87,
-                          padding: const EdgeInsets.only(bottom: 6),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(6),
-                            side: const BorderSide(color: Color(0xFFCFD6E3)),
+                      child: Listener(
+                        onPointerDown: enabled && onNoteDown != null
+                            ? (event) => onNoteDown!(note, event.pointer)
+                            : null,
+                        onPointerUp: enabled && onNoteUp != null
+                            ? (event) => onNoteUp!(note, event.pointer)
+                            : null,
+                        onPointerCancel: enabled && onNoteUp != null
+                            ? (event) => onNoteUp!(note, event.pointer)
+                            : null,
+                        child: ElevatedButton(
+                          onPressed: enabled && onNoteDown == null
+                              ? () => onNotePressed(note)
+                              : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: whiteKeyColor,
+                            foregroundColor: Colors.black87,
+                            disabledBackgroundColor: whiteKeyColor,
+                            disabledForegroundColor: Colors.black87,
+                            padding: const EdgeInsets.only(bottom: 6),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(6),
+                              side: const BorderSide(color: Color(0xFFCFD6E3)),
+                            ),
                           ),
-                        ),
-                        child: Align(
-                          alignment: Alignment.bottomCenter,
-                          child: Text(
-                            note,
-                            style: const TextStyle(fontSize: 10),
+                          child: Align(
+                            alignment: Alignment.bottomCenter,
+                            child: Text(
+                              note,
+                              style: const TextStyle(fontSize: 10),
+                            ),
                           ),
                         ),
                       ),
@@ -86,7 +137,8 @@ class PianoInput extends StatelessWidget {
                       final nextNote = index + 1 < whiteNotes.length
                           ? whiteNotes[index + 1]
                           : null;
-                      final semitoneBetween = _semitone(nextNote) - _semitone(note);
+                      final semitoneBetween =
+                          _semitone(nextNote) - _semitone(note);
                       final hasBlack = nextNote != null && semitoneBetween == 2;
 
                       return SizedBox(
@@ -97,28 +149,68 @@ class PianoInput extends StatelessWidget {
                               Positioned(
                                 right: -10,
                                 top: 0,
-                                child: GestureDetector(
-                                  onTap: enabled
-                                      ? () {
-                                          final black = _sharpBetween(note, nextNote);
-                                          if (black != null) onNotePressed(black);
+                                child: Listener(
+                                  onPointerDown: enabled && onNoteDown != null
+                                      ? (event) {
+                                          final black = _sharpBetween(
+                                            note,
+                                            nextNote,
+                                          );
+                                          if (black != null) {
+                                            onNoteDown!(black, event.pointer);
+                                          }
                                         }
                                       : null,
-                                  child: Container(
-                                    width: 20,
-                                    height: 86,
-                                    decoration: BoxDecoration(
-                                      color: enabled
-                                          ? blackKeyColor
-                                          : const Color(0xFF5A5F6B),
-                                      borderRadius: BorderRadius.circular(4),
-                                      boxShadow: const [
-                                        BoxShadow(
-                                          color: Color(0x33000000),
-                                          blurRadius: 3,
-                                          offset: Offset(0, 2),
-                                        ),
-                                      ],
+                                  onPointerUp: enabled && onNoteUp != null
+                                      ? (event) {
+                                          final black = _sharpBetween(
+                                            note,
+                                            nextNote,
+                                          );
+                                          if (black != null) {
+                                            onNoteUp!(black, event.pointer);
+                                          }
+                                        }
+                                      : null,
+                                  onPointerCancel: enabled && onNoteUp != null
+                                      ? (event) {
+                                          final black = _sharpBetween(
+                                            note,
+                                            nextNote,
+                                          );
+                                          if (black != null) {
+                                            onNoteUp!(black, event.pointer);
+                                          }
+                                        }
+                                      : null,
+                                  child: GestureDetector(
+                                    onTap: enabled && onNoteDown == null
+                                        ? () {
+                                            final black = _sharpBetween(
+                                              note,
+                                              nextNote,
+                                            );
+                                            if (black != null) {
+                                              onNotePressed(black);
+                                            }
+                                          }
+                                        : null,
+                                    child: Container(
+                                      width: 20,
+                                      height: 86,
+                                      decoration: BoxDecoration(
+                                        color: enabled
+                                            ? blackKeyColor
+                                            : const Color(0xFF5A5F6B),
+                                        borderRadius: BorderRadius.circular(4),
+                                        boxShadow: const [
+                                          BoxShadow(
+                                            color: Color(0x33000000),
+                                            blurRadius: 3,
+                                            offset: Offset(0, 2),
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                   ),
                                 ),
@@ -143,15 +235,7 @@ class PianoInput extends StatelessWidget {
     if (pitch == null) return 0;
     final m = RegExp(r'^([A-G])(\d)$').firstMatch(pitch);
     if (m == null) return 0;
-    const map = {
-      'C': 0,
-      'D': 2,
-      'E': 4,
-      'F': 5,
-      'G': 7,
-      'A': 9,
-      'B': 11,
-    };
+    const map = {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11};
     return (int.parse(m.group(2)!) * 12) + map[m.group(1)]!;
   }
 

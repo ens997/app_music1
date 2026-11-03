@@ -54,10 +54,9 @@ class _GameScreenState extends State<GameScreen>
   static const double _staffTop = SMuFLRenderer.compactStaffTop;
   static const double _leftMargin = 80;
 
-  late final ScrollController _scrollController;
+  late final _GameScrollController _scrollController;
   late final Ticker _gameTicker;
   late final VoidCallback _scrollListener;
-  late final Listenable _visualRepaint;
   late final TimingsCallback _frameTimingsCallback;
   Duration? _lastAutoScrollFrame;
   DateTime? _lastPerformanceReport;
@@ -78,6 +77,10 @@ class _GameScreenState extends State<GameScreen>
   bool _isLeaving = false;
   bool _hasCompletedRun = false;
   bool _isShowingResultsDialog = false;
+  final Map<int, String> _activeHeldPointers = {};
+  final Map<int, (String, int)> _heldVoiceIds = {};
+  final Map<int, int> _heldNoteGenerations = {};
+  int _nextHeldNoteGeneration = 0;
   void Function(GameState)? _sessionStateListener;
   VoidCallback? _sessionNoteHitListener;
   void Function(int noteIndex, HitQuality quality, bool isCorrectPitch)?
@@ -112,12 +115,11 @@ class _GameScreenState extends State<GameScreen>
         defaultAudioBackend?.metronome ??
         const SilentMetronomeAudioOutput();
     _gameTicker = createTicker(_onGameTick);
-    _scrollController = ScrollController();
+    _scrollController = _GameScrollController();
     _scrollListener = () {
       if (!_isLeaving) _scrollOffset.value = _scrollController.offset;
     };
     _scrollController.addListener(_scrollListener);
-    _visualRepaint = Listenable.merge([_scrollOffset, _gameRevision]);
     _frameTimingsCallback = _recordFrameTimings;
     SchedulerBinding.instance.addTimingsCallback(_frameTimingsCallback);
 
@@ -149,6 +151,7 @@ class _GameScreenState extends State<GameScreen>
   @override
   void dispose() {
     _isLeaving = true;
+    _releaseAllHeldNotes();
     _stopAutoScroll();
     noteSpacingScale.removeListener(_updateNoteLayouts);
     musicStartOffsetScale.removeListener(_updateNoteLayouts);
@@ -392,6 +395,7 @@ class _GameScreenState extends State<GameScreen>
     if (session == null) return;
 
     _hasCompletedRun = true;
+    _releaseAllHeldNotes();
     _stopAutoScroll();
     unawaited(_gameAudioTrackController.stop());
     if (_isPlaying) {
@@ -532,15 +536,19 @@ class _GameScreenState extends State<GameScreen>
     final pixelsPerSecond = ticksPerSecond * _pixelsPerTick;
     final dtSeconds = dt.inMicroseconds / 1000000.0;
     final currentOffset = _scrollController.offset;
-    final maxOffset = _scrollController.position.maxScrollExtent;
+    final scrollPosition = _scrollController.position;
+    final maxOffset = scrollPosition.maxScrollExtent;
     final nextOffset = currentOffset + (pixelsPerSecond * dtSeconds);
 
-    _scrollController.jumpTo(nextOffset >= maxOffset ? maxOffset : nextOffset);
+    _scrollController.setGamePixels(
+      nextOffset >= maxOffset ? maxOffset : nextOffset,
+    );
   }
 
   void _stopAutoScroll() {
     _gameTicker.stop();
     _lastAutoScrollFrame = null;
+    _scrollController.stopGameScroll();
   }
 
   void _recordFrameTimings(List<FrameTiming> timings) {
@@ -605,6 +613,7 @@ class _GameScreenState extends State<GameScreen>
   void _leaveGame() {
     if (_isLeaving || !mounted) return;
     _isLeaving = true;
+    _releaseAllHeldNotes();
     _stopAutoScroll();
     _gameSession?.stop();
     unawaited(_gameAudioTrackController.stop());
@@ -627,6 +636,66 @@ class _GameScreenState extends State<GameScreen>
       await _instrumentAudioOutput.playNote(pitch);
     } catch (error) {
       debugPrint('No se pudo reproducir la nota $pitch: $error');
+    }
+  }
+
+  Future<void> _handleSustainedNoteDown(String pitch, int pointerId) async {
+    final output = _instrumentAudioOutput;
+    if (output is! SustainedInstrumentAudioOutput ||
+        !_isPlaying ||
+        _gameSession == null ||
+        _activeHeldPointers.containsKey(pointerId)) {
+      return;
+    }
+    if (!_gameSession!.handleNoteInput(pitch)) return;
+    _activeHeldPointers[pointerId] = pitch;
+    final generation = ++_nextHeldNoteGeneration;
+    _heldNoteGenerations[pointerId] = generation;
+
+    try {
+      final voiceId = await output.noteOn(pitch);
+      if (voiceId == null) return;
+      if (!_activeHeldPointers.containsKey(pointerId) ||
+          _heldNoteGenerations[pointerId] != generation) {
+        await output.noteOff(voiceId);
+        return;
+      }
+      _heldVoiceIds[pointerId] = (pitch, voiceId);
+    } catch (error) {
+      debugPrint('No se pudo sostener la nota $pitch: $error');
+    }
+  }
+
+  void _handleSustainedNoteUp(String pitch, int pointerId) {
+    _activeHeldPointers.remove(pointerId);
+    _heldNoteGenerations.remove(pointerId);
+    final heldVoice = _heldVoiceIds.remove(pointerId);
+    final output = _instrumentAudioOutput;
+    if (heldVoice == null || output is! SustainedInstrumentAudioOutput) return;
+    unawaited(_releaseVoice(output, heldVoice.$2, heldVoice.$1));
+  }
+
+  void _releaseAllHeldNotes() {
+    final pointers = {
+      ..._activeHeldPointers.keys,
+      ..._heldVoiceIds.keys,
+    }.toList();
+    for (final pointerId in pointers) {
+      final pitch =
+          _activeHeldPointers[pointerId] ?? _heldVoiceIds[pointerId]!.$1;
+      _handleSustainedNoteUp(pitch, pointerId);
+    }
+  }
+
+  Future<void> _releaseVoice(
+    SustainedInstrumentAudioOutput output,
+    int voiceId,
+    String pitch,
+  ) async {
+    try {
+      await output.noteOff(voiceId);
+    } catch (error) {
+      debugPrint('No se pudo liberar la nota $pitch: $error');
     }
   }
 
@@ -844,7 +913,7 @@ class _GameScreenState extends State<GameScreen>
                                                       _scrollOffset.value,
                                                   scrollOffsetListenable:
                                                       _scrollOffset,
-                                                  repaint: _visualRepaint,
+                                                  repaint: _scrollOffset,
                                                   viewportWidth:
                                                       _currentViewportWidth,
                                                 ),
@@ -951,6 +1020,14 @@ class _GameScreenState extends State<GameScreen>
               child: PianoInput(
                 enabled: _isPlaying,
                 onNotePressed: _handleNoteInput,
+                onNoteDown:
+                    _instrumentAudioOutput is SustainedInstrumentAudioOutput
+                    ? _handleSustainedNoteDown
+                    : null,
+                onNoteUp:
+                    _instrumentAudioOutput is SustainedInstrumentAudioOutput
+                    ? _handleSustainedNoteUp
+                    : null,
               ),
             ),
           ],
@@ -961,3 +1038,78 @@ class _GameScreenState extends State<GameScreen>
 }
 
 enum _ResultsAction { leave, retry }
+
+class _GameScrollController extends ScrollController {
+  void setGamePixels(double pixels) {
+    final scrollPosition = position;
+    if (scrollPosition is! _GameScrollPosition) {
+      throw StateError('Game scroll controller has an unexpected position');
+    }
+    scrollPosition.setGamePixels(pixels);
+  }
+
+  void stopGameScroll() {
+    if (!hasClients) return;
+    final scrollPosition = position;
+    if (scrollPosition is! _GameScrollPosition) {
+      throw StateError('Game scroll controller has an unexpected position');
+    }
+    scrollPosition.stopGameScroll();
+  }
+
+  @override
+  ScrollPosition createScrollPosition(
+    ScrollPhysics physics,
+    ScrollContext context,
+    ScrollPosition? oldPosition,
+  ) {
+    return _GameScrollPosition(
+      physics: physics,
+      context: context,
+      initialPixels: initialScrollOffset,
+      keepScrollOffset: keepScrollOffset,
+      oldPosition: oldPosition,
+      debugLabel: debugLabel,
+    );
+  }
+}
+
+class _GameScrollPosition extends ScrollPositionWithSingleContext {
+  _GameScrollPosition({
+    required super.physics,
+    required super.context,
+    super.initialPixels,
+    super.keepScrollOffset,
+    super.oldPosition,
+    super.debugLabel,
+  });
+
+  _GameScrollActivity? _gameScrollActivity;
+
+  void setGamePixels(double pixels) {
+    // Keep setPixels valid without restarting scroll activity every frame.
+    if (!identical(activity, _gameScrollActivity)) {
+      _gameScrollActivity = _GameScrollActivity(this);
+      beginActivity(_gameScrollActivity);
+    }
+    setPixels(pixels);
+  }
+
+  void stopGameScroll() {
+    if (identical(activity, _gameScrollActivity)) goIdle();
+    _gameScrollActivity = null;
+  }
+}
+
+class _GameScrollActivity extends ScrollActivity {
+  _GameScrollActivity(super.delegate);
+
+  @override
+  bool get shouldIgnorePointer => false;
+
+  @override
+  bool get isScrolling => true;
+
+  @override
+  double get velocity => 0;
+}

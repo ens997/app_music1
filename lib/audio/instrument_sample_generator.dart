@@ -7,18 +7,21 @@ import 'violin_audio_sample_generator.dart';
 typedef InstrumentSampleBatch = ({
   InstrumentType instrument,
   List<String> notes,
+  bool sustained,
 });
 
 Map<String, Uint8List> buildInstrumentSampleBatch(InstrumentSampleBatch batch) {
   return {
     for (final note in batch.notes)
       note: switch (batch.instrument) {
-        InstrumentType.flute => FluteAudioSampleGenerator.buildSample(
-          pitch: note,
-        ),
-        InstrumentType.violin => ViolinAudioSampleGenerator.buildSample(
-          pitch: note,
-        ),
+        InstrumentType.flute =>
+          batch.sustained
+              ? FluteAudioSampleGenerator.buildSustainSample(pitch: note)
+              : FluteAudioSampleGenerator.buildSample(pitch: note),
+        InstrumentType.violin =>
+          batch.sustained
+              ? ViolinAudioSampleGenerator.buildSustainSample(pitch: note)
+              : ViolinAudioSampleGenerator.buildSample(pitch: note),
         InstrumentType.piano => throw ArgumentError.value(
           batch.instrument,
           'instrument',
@@ -30,10 +33,12 @@ Map<String, Uint8List> buildInstrumentSampleBatch(InstrumentSampleBatch batch) {
 
 Future<Map<String, Uint8List>> generateInstrumentSampleBatch(
   InstrumentType instrument,
-  List<String> notes,
-) {
+  List<String> notes, {
+  bool sustained = false,
+}) {
   return compute(buildInstrumentSampleBatch, (
     instrument: instrument,
     notes: notes,
+    sustained: sustained,
   ));
 }

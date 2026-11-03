@@ -2,18 +2,19 @@ import 'dart:math' as math;
 import 'dart:typed_data';
 
 import '../core/musical_engine/pitch_utils.dart';
+import 'looping_tone_sample_generator.dart';
 import 'pcm_wav_builder.dart';
 
 class FluteAudioSampleGenerator {
+  static const int sustainAttackMs = 35;
+  static const int sustainLoopDurationMs = 1000;
+
   static Uint8List buildSample({
     required String pitch,
     int sampleRate = 22050,
     int durationMs = 800,
   }) {
-    final midiNote = PitchUtils.toMidi(pitch);
-    if (midiNote == null || midiNote < 0 || midiNote > 127) {
-      throw ArgumentError.value(pitch, 'pitch');
-    }
+    final midiNote = _validatedMidiNote(pitch);
     _validateSampleDimensions(sampleRate, durationMs);
 
     final frequency = 440.0 * math.pow(2.0, (midiNote - 69) / 12.0).toDouble();
@@ -52,6 +53,28 @@ class FluteAudioSampleGenerator {
         return value;
       },
     );
+  }
+
+  static Uint8List buildSustainSample({
+    required String pitch,
+    int sampleRate = 22050,
+  }) {
+    final midiNote = _validatedMidiNote(pitch);
+    final frequency = 440.0 * math.pow(2.0, (midiNote - 69) / 12.0).toDouble();
+    return LoopingToneSampleGenerator.build(
+      frequency: frequency,
+      sampleRate: sampleRate,
+      loopDurationMs: sustainLoopDurationMs,
+      harmonics: const [0.78, 0.15, 0.045, 0.012],
+    );
+  }
+
+  static int _validatedMidiNote(String pitch) {
+    final midiNote = PitchUtils.toMidi(pitch);
+    if (midiNote == null || midiNote < 0 || midiNote > 127) {
+      throw ArgumentError.value(pitch, 'pitch');
+    }
+    return midiNote;
   }
 
   static void _validateSampleDimensions(int sampleRate, int durationMs) {

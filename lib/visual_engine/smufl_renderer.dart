@@ -46,6 +46,9 @@ class SMuFLRenderer extends CustomPainter {
   Size? _lastCacheSize;
   late final List<double> _barLineXPositions;
   late final List<List<NoteLayout>> _beamGroups;
+  late final List<double> _noteXPositions;
+  late final List<double> _beamGroupFirstX;
+  late final List<double> _beamGroupLastX;
 
   // Pinceles estáticos
   static final Paint _backgroundPaint = Paint();
@@ -93,6 +96,11 @@ class SMuFLRenderer extends CustomPainter {
        super(repaint: repaint) {
     _barLineXPositions = _calculateBarLineXPositions();
     _beamGroups = _groupBeamedNotes(noteLayouts);
+    _noteXPositions = [for (final layout in noteLayouts) layout.position.dx];
+    _beamGroupFirstX = [
+      for (final group in _beamGroups) group.first.position.dx,
+    ];
+    _beamGroupLastX = [for (final group in _beamGroups) group.last.position.dx];
   }
 
   final ValueListenable<double>? scrollOffsetListenable;
@@ -225,11 +233,12 @@ class SMuFLRenderer extends CustomPainter {
       endX = currentScrollOffset + viewportWidth! + _cullingMargin;
     }
 
-    for (final layout in noteLayouts) {
-      // Culling: saltar notas fuera del viewport
-      if (startX != null && endX != null) {
-        if (layout.position.dx < startX || layout.position.dx > endX) continue;
-      }
+    final firstVisible = startX == null
+        ? 0
+        : _lowerBound(_noteXPositions, startX);
+    for (var index = firstVisible; index < noteLayouts.length; index++) {
+      final layout = noteLayouts[index];
+      if (endX != null && layout.position.dx > endX) break;
       NoteVisual.drawNote(
         canvas,
         layout.note,
@@ -283,13 +292,13 @@ class SMuFLRenderer extends CustomPainter {
       ..strokeCap = StrokeCap.butt
       ..style = PaintingStyle.stroke;
 
-    for (final group in _beamGroups) {
+    final firstVisible = visibleStart == null
+        ? 0
+        : _lowerBound(_beamGroupLastX, visibleStart);
+    for (var index = firstVisible; index < _beamGroups.length; index++) {
+      final group = _beamGroups[index];
+      if (visibleEnd != null && _beamGroupFirstX[index] > visibleEnd) break;
       if (group.length < 2) continue;
-      if (visibleStart != null && visibleEnd != null) {
-        final firstX = group.first.position.dx;
-        final lastX = group.last.position.dx;
-        if (lastX < visibleStart || firstX > visibleEnd) continue;
-      }
 
       // Extraer offsets de las notas (posición de la cabeza)
       final noteOffsets = group.map((l) => l.position).toList();
@@ -557,6 +566,20 @@ class SMuFLRenderer extends CustomPainter {
     }
     return (TicksEngine.tpnq * timeSignature!.numerator * 4) ~/
         timeSignature!.denominator;
+  }
+
+  int _lowerBound(List<double> values, double target) {
+    var low = 0;
+    var high = values.length;
+    while (low < high) {
+      final middle = low + (high - low) ~/ 2;
+      if (values[middle] < target) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    return low;
   }
 
   List<double> _calculateBarLineXPositions() {

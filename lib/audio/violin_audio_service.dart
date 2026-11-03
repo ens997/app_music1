@@ -1,9 +1,19 @@
 import 'instrument_type.dart';
 import 'sampled_instrument_audio_service.dart';
+import 'violin_audio_sample_generator.dart';
 
 class ViolinAudioService extends SampledInstrumentAudioService {
   ViolinAudioService()
-    : super(instrument: InstrumentType.violin, supportedNotes: supportedNotes);
+    : super(
+        instrument: InstrumentType.violin,
+        supportedNotes: supportedNotes,
+        sustainAttack: const Duration(
+          milliseconds: ViolinAudioSampleGenerator.sustainAttackMs,
+        ),
+        sustainLoopDuration: const Duration(
+          milliseconds: ViolinAudioSampleGenerator.sustainLoopDurationMs,
+        ),
+      );
 
   static const List<String> supportedNotes = [
     'G3',

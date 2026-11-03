@@ -20,4 +20,24 @@ void main() {
     expect(violinSamples['G3'], isNotEmpty);
     expect(violinSamples['E7'], isNotEmpty);
   });
+
+  test(
+    'generates held-note samples through the same isolate batch API',
+    () async {
+      final fluteSamples = await generateInstrumentSampleBatch(
+        InstrumentType.flute,
+        ['A4'],
+        sustained: true,
+      );
+      final violinSamples = await generateInstrumentSampleBatch(
+        InstrumentType.violin,
+        ['A4'],
+        sustained: true,
+      );
+
+      expect(fluteSamples['A4'], isNotEmpty);
+      expect(violinSamples['A4'], isNotEmpty);
+      expect(fluteSamples['A4'], isNot(violinSamples['A4']));
+    },
+  );
 }

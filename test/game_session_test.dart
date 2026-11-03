@@ -98,6 +98,58 @@ void main() {
     expect(session.handleNoteInput('Db4'), isTrue);
   });
 
+  test('GameSession finds the next note in an unordered score', () {
+    final timeSource = FakeTimeSource();
+    final session = GameSession(
+      ticksEngine: TicksEngine(timeSource: timeSource),
+      scoreEngine: ScoreEngine(),
+      musicScore: _score([
+        NoteModel(
+          pitch: 'D4',
+          duration: NoteDuration.quarter,
+          absoluteTick: 480,
+        ),
+        NoteModel(pitch: 'C4', duration: NoteDuration.quarter, absoluteTick: 0),
+      ]),
+    );
+    session.start();
+
+    expect(session.handleNoteInput('C4'), isTrue);
+
+    timeSource.advance(const Duration(milliseconds: 500));
+    expect(session.handleNoteInput('D4'), isTrue);
+  });
+
+  test('GameSession handles a long score without scanning old notes', () {
+    const noteCount = 5000;
+    final timeSource = FakeTimeSource();
+    final session = GameSession(
+      ticksEngine: TicksEngine(timeSource: timeSource),
+      scoreEngine: ScoreEngine(),
+      musicScore: _score([
+        for (var index = 0; index < noteCount; index++)
+          NoteModel(
+            pitch: 'C4',
+            duration: NoteDuration.quarter,
+            absoluteTick: index * TicksEngine.tpnq,
+          ),
+      ]),
+    );
+    session.start();
+    timeSource.advance(
+      Duration(
+        milliseconds:
+            (noteCount - 1) *
+            TicksEngine.tpnq *
+            60000 ~/
+            (TicksEngine.tpnq * 120),
+      ),
+    );
+
+    expect(session.handleNoteInput('C4'), isTrue);
+    expect(session.scoreEngine.hitCount, 1);
+  });
+
   test('GameSession finish is idempotent', () {
     final session = GameSession(
       ticksEngine: TicksEngine(),

@@ -44,6 +44,34 @@ void main() {
     expect(firstA4, isNot(c5));
   });
 
+  test('builds a stable phase-continuous sustain loop sample', () {
+    final first = FluteAudioSampleGenerator.buildSustainSample(pitch: 'A4');
+    final second = FluteAudioSampleGenerator.buildSustainSample(pitch: 'A4');
+    final header = ByteData.sublistView(first);
+    final sampleRate = header.getUint32(24, Endian.little);
+    final loopSampleCount = header.getUint32(40, Endian.little) ~/ 2;
+    final firstSample = header.getInt16(44, Endian.little);
+    final nextSample = header.getInt16(46, Endian.little);
+    final lastSample = header.getInt16(
+      44 + (loopSampleCount - 1) * 2,
+      Endian.little,
+    );
+
+    expect(first, second);
+    expect(String.fromCharCodes(first.sublist(0, 4)), 'RIFF');
+    expect(
+      loopSampleCount,
+      closeTo(
+        sampleRate * FluteAudioSampleGenerator.sustainLoopDurationMs ~/ 1000,
+        1,
+      ),
+    );
+    expect(
+      (firstSample - lastSample) - (nextSample - firstSample),
+      closeTo(0, 3),
+    );
+  });
+
   test('rejects invalid pitches and sample dimensions', () {
     expect(
       () => FluteAudioSampleGenerator.buildSample(pitch: 'invalid'),

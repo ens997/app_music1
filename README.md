@@ -166,6 +166,14 @@ concurrentes comparten una sola operación; los fallos dejan el audio como no
 disponible para evitar reintentos por cada nota. La liberación espera la
 inicialización en curso y es idempotente.
 
+La flauta y el violín exponen también note-on/note-off: generan un WAV con
+ataque y región de sustain en loop mientras se mantiene pulsada una tecla, y
+aplican un fade breve al soltarla. Esta primera iteración usa tonos de prueba
+generados localmente; el objetivo es validar la duración de las notas con
+`flutter_soloud` sin actualizar la versión de Flutter/Dart ni el motor de audio.
+La migración a samples reales y sus puntos de loop queda para el siguiente
+paso.
+
 Los backends de flauta y violín comparten `SampledInstrumentAudioService`,
 que centraliza la generación en isolate, caché WAV, carga de SoLoud y limpieza.
 El generador de violín sintetiza un timbre de cuerda sostenido y cubre G3–E7.

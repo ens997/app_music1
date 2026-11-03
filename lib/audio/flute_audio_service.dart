@@ -1,9 +1,19 @@
 import 'instrument_type.dart';
+import 'flute_audio_sample_generator.dart';
 import 'sampled_instrument_audio_service.dart';
 
 class FluteAudioService extends SampledInstrumentAudioService {
   FluteAudioService()
-    : super(instrument: InstrumentType.flute, supportedNotes: supportedNotes);
+    : super(
+        instrument: InstrumentType.flute,
+        supportedNotes: supportedNotes,
+        sustainAttack: const Duration(
+          milliseconds: FluteAudioSampleGenerator.sustainAttackMs,
+        ),
+        sustainLoopDuration: const Duration(
+          milliseconds: FluteAudioSampleGenerator.sustainLoopDurationMs,
+        ),
+      );
 
   static const List<String> supportedNotes = [
     'C4',
